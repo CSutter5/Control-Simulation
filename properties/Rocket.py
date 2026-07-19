@@ -1,5 +1,7 @@
 from dataclasses import dataclass, field
 
+import math
+
 @dataclass
 class Rocket:
     """
@@ -13,6 +15,15 @@ class Rocket:
     """
     rollMMOI_kgm2:          float
 
-    rollAngle_rad:          float = 0.0
+    _rollAngle_rad:          float = 0.0
     rollVelocity_rps:       float = 0.0
     verticalVelocity_mps:   float = 0.0
+
+
+    @property
+    def rollAngle_rad(self) -> float:
+        return self._rollAngle_rad
+
+    @rollAngle_rad.setter
+    def rollAngle_rad(self, angle: float):
+        self._rollAngle_rad = (angle + math.pi) % (2 * math.pi) - math.pi
