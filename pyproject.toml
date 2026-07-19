@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "control_sim"
+version = "0.0.0"
+description = "Control Simulation package"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+	"pandas",
+	"numpy",
+	"scipy",
+	"matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["properties*", "environments*", "example*"]
