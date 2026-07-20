@@ -93,6 +93,8 @@ class CanardSim:
         # Add any recorded roll data
         self.rocket.rollAngle_rad += self.data.getRecordedRollRate(self.time_s) * self.timestep_s
 
+        self.rocket.verticalVelocity_mps = self.data.getAirSpeed(self.time_s)
+
         # Calculate torque generate by the canards
         generatedTorque  = self.__calculateFinLift() * self.canards.canardDistance_m
         generatedTorque *= -1 if self.canards.canardAngle_rad < 0 else 1
@@ -110,16 +112,15 @@ class CanardSim:
 
     def __calculateFinLift(self) -> float:
         # Get data for current time
-        airSpeed_mps    = self.data.getAirSpeed(self.time_s)
         airDensity_kgm3 = self.data.getAirDensity(self.time_s)
 
-        CL = self.canards.getCL(airSpeed_mps)
+        CL = self.canards.getCL(self.rocket.verticalVelocity_mps)
 
         if CL == "Out of bounds":
             # print(f"Warning: Angle {math.degrees(angle):.2f} degrees and velocity {airspeed:.2f} m/s are out of bounds for the CL interpolator.")
             # If the angle and velocity are outside the range of the CSV, we can assume the coefficient of lift is 0
             return 0
         
-        generatedLift = CL * 0.5 * airSpeed_mps**2 * airDensity_kgm3 * self.canards.surfaceArea_m2
+        generatedLift = CL * 0.5 * self.rocket.verticalVelocity_mps**2 * airDensity_kgm3 * self.canards.surfaceArea_m2
 
         return generatedLift
