@@ -35,6 +35,7 @@ class Canard:
     canardDistance_m:   float
     
     canardAngleRateLimit_rps: float
+    canardAngleRate_rps:      float = field(init=False)
 
     surfaceArea_m2:     float = field(init=False)
 
@@ -64,10 +65,10 @@ class Canard:
     def canardAngle_rad(self, angle):
         maxChange = self.canardAngleRateLimit_rps * self.dt
 
-        delta = angle - self._canardAngle_rad
-        delta = max(-maxChange, min(maxChange, delta))
+        self.canardAngleRate_rps = angle - self._canardAngle_rad
+        self.canardAngleRate_rps = max(-maxChange, min(maxChange, self.canardAngleRate_rps))
 
-        self._canardAngle_rad = max(min(self._canardAngle_rad + delta, self.maxCanardAngle_rad), self.minCanardAngle_rad)
+        self._canardAngle_rad = max(min(self._canardAngle_rad + self.canardAngleRate_rps, self.maxCanardAngle_rad), self.minCanardAngle_rad)
 
     def getCL(self, velocity: float) -> float:
         res = self.liftInterpFunc(abs(math.degrees(self._canardAngle_rad)), velocity)

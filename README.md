@@ -43,3 +43,15 @@ Extending and customizing
 - Parameter sweep and batch runs: add a small CLI or a `scripts/` runner that launches multiple simulations with different controller parameters and aggregates results into plots or CSV.
 - Adding more control techniques like tvc, airbreaks or 6dof aero control
 - Add system dampening
+
+
+Plans for Rewrite
+-----------------
+Instead of having seperate simulation env's, there should only be 1 env and you can add different control mechanisms to a rocket.
+That way you can have either use multiply control mechanisms or swap them out easily
+
+The `rocket` will contain the simulation engine and there will be a generic class `control` that canards, reaction wheels, etc. will inherit from. \
+To run a step you use kwargs to set the control mechanisms ex. `rocket.step(canardAngle=0,reactionWheelSpeed=200)`
+
+Inside of the `rocket.step` method the relavent control mechanisms will be updated and queries for all the toqures applied to the main body. tl;dr/ex the rocket will update the canard angle and in return it will a tuple of torques
+
