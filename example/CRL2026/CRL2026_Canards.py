@@ -1,80 +1,78 @@
+import math
+
 import matplotlib.pyplot as plt
 import pandas as pd
 
-import math
+import Controls
+import Rocket
 
-from environments.CanardSim import CanardSim
+turnStart_s = 7
+turnEnd_s   = 9
+turnLerp_s  = 0.5
 
-from properties.Canard import Canard
-from properties.Data import Data
-from properties.Rocket import Rocket
+startingTargetAngle_deg = 0
+turnAngle_deg = 90
 
-# Define all rocket properties
+def target(time_s: float) -> tuple[float, float, float, float, float, float]:
+    """ Target Function
 
-MOTOR_BURNOUT = 1.7 # seconds
+    Args:
+        time_s (float): Simulation Time Step
 
-canards = Canard(
-    airfoilDataPath="airfoil/0012_airfoil_data.csv",
-    rootCoord_m=0.0635,
-    tipCoord_m=0.01905,
-    span_m=0.0254,
-    sweep_m=0.04445,
-    canardDistance_m=0.05,
-    canardAngleRateLimit_rps=math.radians(120.0),
-    minCanardAngle_rad=math.radians(-10.0),
-    maxCanardAngle_rad=math.radians(10.0)
-)
+    Returns:
+        tuple[float, float, float, float, float, float]: The target location and orientation [posX_m, posY_m, posZ_m, yaw_deg, pitch_deg, roll_deg]
+    """
 
-rocket = Rocket(
-    rollMMOI_kgm2=0.01004
-)
-
-# Define all flight properties
-
-data = Data(
-    dataPath="Canard Rocket.csv",
-    # dataPath="Test Flight Data.csv",
-    startingTemperature_c=6,
-    startingPressure_pa=102998,
-    humidity=0.9
-)
-
-STARTING_TARGET_ANGLE = 0
-TURN_START  = 7   # seconds
-TURN_END    = 9   # seconds
-TURN_ANGLE  = math.radians(90)  # radians
-TURN_LERP   = 0.5  # seconds
-
-def targetFunction(time) -> float:
     def lerp(a: float, b: float, t: float) -> float:
         return (1 - t) * a + t * b
-    
+
+    rollAngle = 0
+
     # If we are at the start of the turn
-    if time > TURN_START and time < TURN_START + TURN_LERP:
-        return lerp(STARTING_TARGET_ANGLE, TURN_ANGLE, (time - TURN_START) / TURN_LERP)
+    if time_s > turnStart_s and time_s < turnStart_s + turnLerp_s:
+        rollAngle = lerp(startingTargetAngle_deg, turnAngle_deg, (time_s - turnStart_s) / turnLerp_s)
 
     # If we are at the end of the turn
-    if time > TURN_END and time < TURN_END + TURN_LERP:
-        return lerp(TURN_ANGLE, STARTING_TARGET_ANGLE, (time - TURN_END) / TURN_LERP)
+    if time_s > turnEnd_s and time_s < turnEnd_s + turnLerp_s:
+        rollAngle = lerp(turnAngle_deg, startingTargetAngle_deg, (time_s - turnEnd_s) / turnLerp_s)
 
     # If we are holding the turn
-    if time >= TURN_START + TURN_LERP and time <= TURN_END:
-        return TURN_ANGLE
+    if time_s >= turnStart_s + turnLerp_s and time_s <= turnEnd_s:
+        rollAngle = turnAngle_deg
 
-    return STARTING_TARGET_ANGLE
-
-# Define all simulation properties
+    
+    return (0, 0, 0, 0, 0, rollAngle)
 
 TIMESTEP = 0.01
 
-sim = CanardSim(
-    data=data,
-    rocket=rocket,
-    canards=canards,
+
+canards = Controls.Canards(
+    airfoilDataPath="airfoil/0012_airfoil_data.csv", # Table of Cl for different velocities and aoa's
+    root_m=0.0635,
+    tip_m=0.01905,
+    span_m=0.0254,
+    sweep_m=0.04445,
     numCanards=2,
-    targetFunction=targetFunction,
-    simulationEnd_s=15,
-    timestep_s=TIMESTEP
+    offset_m=0.05,
+    maxAngle_deg=10,
+    rateLimit_dps=120,
+    updateFreq_hz=1/50 # 50 hz
+)
+
+rocket = Rocket.Rocket(
+    simDataPath="Canard Rocket.csv", # Requiremets are dependent on the control methon used
+    # simDataPath="Test Flight Data.csv",
+    Ix_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the x-axis
+    Iy_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the y-axis
+    Iz_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the z-axis
+    r_m=0.05,
+    length_m=0,
+    mass_kg=0,
+    targetFunc=target,
+    simTimeStep=TIMESTEP,
+    controls=[
+        canards
+    ]
 )
 
 # Plots
@@ -110,85 +108,67 @@ def plot(df: pd.DataFrame):
     ax3_2.set_ylabel('Air Density (kg/m^3)')
     ax3_2.legend(loc='lower left')
 
-    # --- Mark angle changes with vertical lines == 1 ---
-    eventTimes = df.loc[df['eventMarker'] == 1, 'time']
-    for t in eventTimes:
-        axs[0].axvline(x=t, color='purple', linestyle='--', alpha=0.7)
-        axs[1].axvline(x=t, color='purple', linestyle='--', alpha=0.7)
-        axs[2].axvline(x=t, color='purple', linestyle='--', alpha=0.7)
-
     plt.tight_layout()
     plt.show()
 
+
 if __name__ == "__main__":
-    sim.reset()
+    rocket.reset()
 
     df = pd.DataFrame(columns=[
         'time', 'targetAngle', 'rocketAngle', 'rocketAngularVelocity',
-        'canardAngle', 'eventMarker', 'error', 'airSpeed', 'airDensity'
+        'canardAngle', 'error', 'airSpeed', 'airDensity'
     ])
 
     df.loc[0] = {
-        'time':                  0.0,
-        'targetAngle':           math.degrees(targetFunction(0.0)),
-        'rocketAngle':           math.degrees(rocket.rollAngle_rad),
-        'rocketAngularVelocity': math.degrees(rocket.verticalVelocity_mps)/6,
-        'canardAngle':           math.degrees(canards.canardAngle_rad),
-        'eventMarker':           0,
-        'error':                 math.degrees(targetFunction(0.0) - rocket.rollAngle_rad),
-        'airSpeed':              data.getAirSpeed(0.0),
-        'airDensity':            data.getAirDensity(0.0)
+        'time':                  rocket.simTime,
+        'targetAngle':           rocket.targetRoll_deg,
+        'rocketAngle':           rocket.roll_deg,
+        'rocketAngularVelocity': rocket.rollVel_dps/6,
+        'canardAngle':           canards.angle_rad,
+        'error':                 rocket.rollError_deg,
+        'airSpeed':              rocket.zVel_mps,
+        'airDensity':            rocket.airDensity
     }
 
-    motorBurnedOut = 0
-    
-    # PID Values
-    Kp = 0.1
+    Kp = 5.7
     Ki = 0.0
-    Kd = 0.05
-    KiLimit = 0.5
+    Kd = 2.8
 
-    canardPID       = 0.0
-    error           = 0.0
-    lastError       = 0.0
-    integralError   = 0.0
-    derivativeError = 0.0
+    p = 0.0
+    i = 0.0
+    d = 0.0
 
-    while sim.running:
-        integralError  += error * TIMESTEP                  # Integral
-        derivativeError = (error - lastError) / TIMESTEP    # Derivative
+    error = 0.0
+    lastError = 0.0
 
-        integralError = max(min(integralError, KiLimit), -KiLimit) # Anti-windup for integral term
+    while rocket.running:
+        error = math.degrees(rocket.rollError_rad)
 
-        canardPID = \
-            Kp * error + \
-            Ki * integralError + \
-            Kd * derivativeError   # The PID values is the torque applied to the rocket from the canard
+        p  = error
+        i += error * TIMESTEP
+        d  = (error - lastError) / TIMESTEP
 
+        pid = \
+            Kp * p + \
+            Ki * i + \
+            Kd * d
+        
         lastError = error
-        error = sim.step(canardPID)
 
-        if (not sim.time_s < MOTOR_BURNOUT):
-            motorBurnedOut += 1
-
-        eventMarker = 0
-        if sim.time_s == TURN_START or sim.time_s == TURN_END:
-            eventMarker = 1
-        if motorBurnedOut == 1:
-            eventMarker = 1
+        rocket.sim(
+            canardAngle_deg=pid
+        )
 
         df.loc[len(df)] = {
-            'time':                  sim.time_s,
-            'targetAngle':           math.degrees(sim.targetRollAngle_rad),
-            'rocketAngle':           math.degrees(rocket.rollAngle_rad),
-            'rocketAngularVelocity': math.degrees(rocket.verticalVelocity_mps),
-            'canardAngle':           math.degrees(canards.canardAngle_rad),
-            'eventMarker':           eventMarker,
-            'error':                 math.degrees(sim.targetRollAngle_rad - rocket.rollAngle_rad),
-            'airSpeed':              data.getAirSpeed(sim.time_s),
-            'airDensity':            data.getAirDensity(sim.time_s)
+            'time':                  rocket.simTime,
+            'targetAngle':           rocket.targetRoll_deg,
+            'rocketAngle':           rocket.roll_deg,
+            'rocketAngularVelocity': rocket.rollVel_dps/6,
+            'canardAngle':           canards.angle_deg,
+            'error':                 rocket.rollError_deg,
+            'airSpeed':              rocket.zVel_mps,
+            'airDensity':            rocket.airDensity
         }
-    
+
     plot(df)
-
-
