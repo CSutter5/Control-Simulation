@@ -1,6 +1,8 @@
 from typing import Callable
 import math
 
+from scipy.spatial.transform import Rotation
+import numpy as np
 import pandas as pd
 
 from Controls import Controls
@@ -33,14 +35,14 @@ class Rocket:
     zVel_mps  = 0.0
     zZcc_mps2 = 0.0
 
-    yaw_rad     = 0.0
-    yawVel_rps  = 0.0
+    yaw_rad    = 0.0
+    yawVel_rps = 0.0
 
-    pitch_rad     = 0.0
-    pitchVel_rps  = 0.0
+    pitch_rad    = 0.0
+    pitchVel_rps = 0.0
 
-    roll_rad     = 0.0
-    rollVel_rps  = 0.0
+    roll_rad    = 0.0
+    rollVel_rps = 0.0
 
     targetXPos_m    = 0.0
     targetYPos_m    = 0.0
@@ -90,10 +92,18 @@ class Rocket:
         self.simTime = 0.0
         self.running = True
 
+        self.q = np.array([1.0, 0.0, 0.0, 0.0])
+
     def reset(self):
         self.simTime = 0.0
 
         self._updateAllSimData()
+
+        self.q = np.array([1.0, 0.0, 0.0, 0.0])
+
+        self.yawVel_rps = 0.0
+        self.pitchVel_rps = 0.0
+        self.rollVel_rps = 0.0
 
         return
 
@@ -129,10 +139,9 @@ class Rocket:
             pitchTorque_Nm  += torques[1]
             rollTorque_Nm   += torques[2]
 
-        if yawTorque_Nm != 0 or pitchTorque_Nm != 0: raise NotImplementedError(f"Pitch and Yaw Simulation is not implemented")
+        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
 
-        self.rollVel_rps += rollTorque_Nm / self.Iz_kgm2 * self.simTimeStep
-        self.roll_rad    += self.rollVel_rps * self.simTimeStep
+        self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
 
         self.posXError_m = self.targetXPos_m - self.xPos_m
         self.posYError_m = self.targetYPos_m - self.yPos_m
@@ -141,6 +150,70 @@ class Rocket:
         self.yawError_rad   = self.targetYaw_rad - self.yaw_rad
         self.pitchError_rad = self.targetPitch_rad - self.pitch_rad
         self.rollError_rad  = self.targetRoll_rad - self.roll_rad
+
+    def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float) -> None:
+        """
+        Apply torques given in the rocket's body reference frame to update angular velocity
+        and integrate the absolute orientation quaternion.
+
+        Angular acceleration is computed per-axis via a decoupled form of Euler's rotation
+        equation (no gyroscopic cross-coupling — see TODO). The resulting body-frame angular
+        velocity is then used to propagate the orientation quaternion self.q via the standard
+        quaternion kinematic equation q_dot = 0.5 * q (x) [0, omega], integrated with a
+        forward-Euler step and renormalized to counteract numerical drift.
+
+        Axis convention: body x = yaw, body y = pitch, body z = roll.
+
+        TODO: Add gyroscopic coupling (omega x I*omega) to the angular acceleration calculation
+        once inertia asymmetry or high spin rates make the decoupled approximation inaccurate.
+
+        Args:
+            yawTorque_Nm (float): Torque about the body x-axis (yaw) in Newton-meters.
+            pitchTorque_Nm (float): Torque about the body y-axis (pitch) in Newton-meters.
+            rollTorque_Nm (float): Torque about the body z-axis (roll) in Newton-meters.
+        """
+        # Decoupled Euler's equation: alpha = torque / I (per axis, no omega x I*omega term)
+        yawAcc_rps2   = yawTorque_Nm / self.Ix_kgm2
+        pitchAcc_rps2 = pitchTorque_Nm / self.Iy_kgm2
+        rollAcc_rps2  = rollTorque_Nm / self.Iz_kgm2
+
+        # Integrate angular velocity (forward Euler)
+        self.yawVel_rps   += yawAcc_rps2 * self.simTimeStep
+        self.pitchVel_rps += pitchAcc_rps2 * self.simTimeStep
+        self.rollVel_rps  += rollAcc_rps2 * self.simTimeStep
+
+        # Quaternion kinematics: q_dot = 0.5 * q (x) [0, omega_body]
+        w, x, y, z = self.q
+        wx, wy, wz = self.yawVel_rps, self.pitchVel_rps, self.rollVel_rps
+
+        qDot = 0.5 * np.array([
+            -x * wx - y * wy - z * wz,
+            w * wx + y * wz - z * wy,
+            w * wy - x * wz + z * wx,
+            w * wz + x * wy - y * wx,
+        ])
+
+        self.q = self.q + qDot * self.simTimeStep
+        self.q = self.q / np.linalg.norm(self.q)  # renormalize — drifts every step otherwise
+
+    def _eulerFromQuat(self) -> tuple[float, float, float]:
+        """
+        Convert the orientation quaternion self.q (scalar-first [w, x, y, z]) into
+        absolute Euler angles matching this rocket's axis convention:
+        body x = yaw, body y = pitch, body z = roll.
+
+        Uses an intrinsic x-y-z rotation sequence. Note: like any 3-parameter Euler
+        angle extraction, this can hit gimbal lock at certain attitudes (here, when
+        the pitch angle approaches +/-90 deg) -- self.q itself has no such singularity,
+        only this derived representation does.
+
+        Returns:
+            tuple[float, float, float]: (yaw_rad, pitch_rad, roll_rad)
+        """
+        w, x, y, z = self.q
+        r = Rotation.from_quat([x, y, z, w])  # scipy wants scalar-last order
+        yaw_rad, pitch_rad, roll_rad = r.as_euler('xyz', degrees=False)
+        return yaw_rad, pitch_rad, roll_rad
 
     @property
     def yaw_deg(self) -> float: return math.degrees(self.yaw_rad)
@@ -172,7 +245,6 @@ class Rocket:
 
     @property
     def pitchError_deg(self) -> float: return math.degrees(self.pitchError_rad)
-
 
     @property
     def roll_deg(self) -> float: return math.degrees(self.roll_rad)
