@@ -8,6 +8,66 @@ import pandas as pd
 from Controls import Controls
 
 class Rocket:
+    """
+    Simulation engine and state container for a single rocket.
+
+    A Rocket owns its full flight state (position, velocity, orientation,
+    and angular rates) and advances that state one timestep at a time via
+    `sim()`. Each call to `sim()` polls every attached `Controls` object for
+    a torque tuple, sums the torques across all controls, applies them to
+    update angular velocity and orientation, and refreshes environment-driven
+    values (airspeed components, air density) from `simData` for the new
+    simulation time.
+
+    Axis convention (consistent throughout this class and its properties):
+        body x = yaw, body y = pitch, body z = roll.
+
+    Units convention:
+        Positions in meters (`*_m`), velocities in meters/sec (`*_mps`),
+        accelerations in m/s^2 (`*_mps2`), angles in radians (`*_rad`) with
+        matching `*_deg` convenience properties, and angular rates in
+        radians/sec (`*_rps`) with matching `*_dps` convenience properties.
+
+    Attributes:
+        simDataPath (str): Path to a CSV of time-indexed environment/flight
+            data (e.g. velocity components, air density) used to drive the
+            simulation.
+        simData (pd.DataFrame): Loaded contents of `simDataPath`.
+        Ix_kgm2, Iy_kgm2, Iz_kgm2 (float): Moments of inertia about the
+            yaw, pitch, and roll body axes respectively, in kg*m^2. Must be
+            nonzero.
+        r_m (float): Rocket body radius in meters.
+        length_m (float): Rocket body length in meters.
+        mass_kg (float): Rocket mass in kilograms.
+        targetFunc (Callable[[float], tuple]): Function mapping simulation
+            time (seconds) to a 6-tuple of
+            (targetXPos_m, targetYPos_m, targetZPos_m, targetYaw_deg,
+            targetPitch_deg, targetRoll_deg) describing the desired
+            trajectory at that time.
+        simTimeStep (float): Fixed timestep in seconds used to advance
+            `simTime` and integrate dynamics each call to `sim()`.
+        controls (list[Controls]): Control objects polled each step; their
+            returned torques are summed before being applied to the rocket.
+        airDensity (float): Current air density, refreshed from `simData`
+            each step.
+        xPos_m/yPos_m/zPos_m, xVel_mps/yVel_mps/zVel_mps: Position and
+            velocity in meters and meters/sec.
+        yaw_rad/pitch_rad/roll_rad: Current absolute orientation in radians,
+            derived from the internal orientation quaternion `self.q`.
+        yawVel_rps/pitchVel_rps/rollVel_rps: Current body-frame angular
+            rates in radians/sec.
+        targetXPos_m/targetYPos_m/targetZPos_m/targetYaw_rad/
+        targetPitch_rad/targetRoll_rad: Desired state at the current
+            simulation time, as returned by `targetFunc`.
+        xPosError_m/yPosError_m/zPosError_m/yawError_rad/pitchError_rad/
+        rollError_rad: Difference between target and actual state,
+            recomputed each step.
+        simStop (float): Simulation time in seconds at which `running`
+            becomes False. Defaults to 15.
+        simTime (float): Elapsed simulation time in seconds.
+        running (bool): False once `simTime` reaches `simStop`.
+    """
+
     simDataPath:    str
     simData: pd.DataFrame
 
@@ -68,6 +128,34 @@ class Rocket:
         targetFunc: Callable[[float], tuple[float, float, float, float, float, float]], 
         simTimeStep: float, controls: list[Controls]
     ):
+        """
+        Initialize the Rocket and load its environment/flight data.
+
+        Args:
+            simDataPath (str): Path to a CSV containing time-indexed
+                environment/flight data (must include a 'time' column;
+                columns such as 'xVel_mps', 'yVel_mps', 'zVel_mps', and
+                'airDensity' are read via `_getSimData`).
+            Ix_kgm2 (float): Moment of inertia about the yaw axis, kg*m^2.
+                Must not be 0.
+            Iy_kgm2 (float): Moment of inertia about the pitch axis, kg*m^2.
+                Must not be 0.
+            Iz_kgm2 (float): Moment of inertia about the roll axis, kg*m^2.
+                Must not be 0.
+            r_m (float): Rocket body radius in meters.
+            length_m (float): Rocket body length in meters.
+            mass_kg (float): Rocket mass in kilograms.
+            targetFunc (Callable[[float], tuple]): Function mapping
+                simulation time (seconds) to
+                (targetXPos_m, targetYPos_m, targetZPos_m, targetYaw_deg,
+                targetPitch_deg, targetRoll_deg).
+            simTimeStep (float): Fixed timestep in seconds used to advance
+                the simulation.
+            controls (list[Controls]): Control objects to poll each step.
+
+        Raises:
+            ValueError: If any of Ix_kgm2, Iy_kgm2, or Iz_kgm2 is 0.
+        """
         self.simDataPath = simDataPath
         self.simData = pd.read_csv(self.simDataPath)
 
@@ -95,6 +183,21 @@ class Rocket:
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
 
     def reset(self):
+        """
+        Reset the rocket to its initial simulation state.
+
+        Zeroes `simTime`, reloads environment data for time 0 via
+        `_updateAllSimData()`, resets the orientation quaternion to
+        identity ([1, 0, 0, 0]), and zeroes all three angular velocities.
+        Does not reset position (`xPos_m`/`yPos_m`/`zPos_m`) or the
+        `controls` list.
+
+        Call this before starting a new simulation run with an
+        already-constructed Rocket, instead of re-instantiating it.
+
+        Returns:
+            None
+        """
         self.simTime = 0.0
 
         self._updateAllSimData()
@@ -108,13 +211,42 @@ class Rocket:
         return
 
     def _updateAllSimData(self):
-        self.xVel_mps = self._getSimData('xVel_mps', self.simTime)
-        self.yVel_mps = self._getSimData('yVel_mps', self.simTime)
+        """
+        Refresh velocity components and air density from `simData` for the
+        current `simTime`.
+
+        Looks up 'zVel_mps', and 'airDensity' at the nearest available row
+        in `simData` via `_getSimData` and assigns them to the corresponding
+        instance attributes. Called once per `sim()` step (and by `reset()`)
+        rather than integrated from first principles, since this data is
+        treated as externally supplied flight/environment input rather 
+        than derived state.
+
+        Returns:
+            None
+        """
         self.zVel_mps = self._getSimData('zVel_mps', self.simTime)
 
         self.airDensity = self._getSimData('airDensity', self.simTime)
 
     def _getSimData(self, columnName: str, time: float) -> float:
+        """
+        Look up a value from `simData` at the row whose 'time' column is
+        closest to the given time.
+
+        Does not interpolate between rows — this is a nearest-neighbor
+        lookup, so accuracy depends on how finely `simData` is sampled
+        relative to `simTimeStep`.
+
+        Args:
+            columnName (str): Name of the column to read (e.g. 'xVel_mps',
+                'airDensity').
+            time (float): Simulation time in seconds to look up.
+
+        Returns:
+            float: The value in `columnName` at the nearest row to `time`,
+                or None if `columnName` is not present in `simData`.
+        """
         if not columnName in self.simData:
             return None
 
@@ -122,12 +254,39 @@ class Rocket:
         return self.simData.loc[idx, columnName]
 
     def sim(self, **kwargs):
+        """
+        Advance the simulation by one `simTimeStep`.
+
+        Steps `simTime` forward, refreshes environment data, evaluates
+        `targetFunc` for the new time, polls every control in `controls`
+        (passing `rocket=self` and any `**kwargs` through to each control's
+        `sim()`), sums the returned per-control torque tuples, applies the
+        aggregate torque via `_applyTorques`, updates the derived Euler
+        angles, and recomputes position/attitude error terms against the
+        target state.
+
+        Args:
+            **kwargs: Forwarded unchanged to every control's `sim()` call.
+                For example, a `Canards` control requires a
+                `canardAngle_deg` keyword argument here.
+
+        Note:
+            The README describes yaw/pitch dynamics as not yet implemented
+            and states that a non-zero yaw or pitch torque should raise an
+            error. That guard is not currently present in `_applyTorques`
+            or here — yaw/pitch torques are applied the same as roll. If
+            you're relying on that documented behavior, treat it as a
+            pending TODO rather than existing protection.
+
+        Returns:
+            None
+        """
         self.simTime += self.simTimeStep
         self.running = self.simTime < self.simStop
 
         self._updateAllSimData()
 
-        self.targetPosX_m, self.targetPosY_m, self.targetPosZ_m, self.targetYaw_deg, self.targetPitch_deg, self.targetRoll_deg = self.targetFunc(self.simTime)
+        self.targetXPos_m, self.targetYPos_m, self.targetZPos_m, self.targetYaw_deg, self.targetPitch_deg, self.targetRoll_deg = self.targetFunc(self.simTime)
 
         yawTorque_Nm    = 0.0
         pitchTorque_Nm  = 0.0
@@ -216,47 +375,76 @@ class Rocket:
         return yaw_rad, pitch_rad, roll_rad
 
     @property
-    def yaw_deg(self) -> float: return math.degrees(self.yaw_rad)
+    def yaw_deg(self) -> float:
+        """float: Current absolute yaw in degrees (derived from `yaw_rad`)."""
+        return math.degrees(self.yaw_rad)
 
     @property
-    def yawVel_dps(self) -> float: return math.degrees(self.yawVel_rps)
+    def yawVel_dps(self) -> float:
+        """float: Current yaw angular rate in degrees/sec (derived from `yawVel_rps`)."""
+        return math.degrees(self.yawVel_rps)
 
     @property
-    def targetYaw_deg(self) -> float: return math.degrees(self.targetYaw_rad)
+    def targetYaw_deg(self) -> float:
+        """float: Target yaw in degrees (derived from `targetYaw_rad`)."""
+        return math.degrees(self.targetYaw_rad)
 
     @targetYaw_deg.setter
-    def targetYaw_deg(self, targetYaw_deg): self.targetRoll_rad = math.radians(targetYaw_deg)
+    def targetYaw_deg(self, targetYaw_deg):
+        """Set the target yaw from degrees, storing it as `targetYaw_rad`."""
+        self.targetYaw_rad = math.radians(targetYaw_deg)
 
     @property
-    def yawError_deg(self) -> float: return math.degrees(self.yawError_rad)
-
-
-    @property
-    def pitch_deg(self) -> float: return math.degrees(self.pitch_rad)
+    def yawError_deg(self) -> float:
+        """float: Yaw error (target minus actual) in degrees."""
+        return math.degrees(self.yawError_rad)
 
     @property
-    def pitchVel_dps(self) -> float: return math.degrees(self.pitchVel_rps)
+    def pitch_deg(self) -> float:
+        """float: Current absolute pitch in degrees (derived from `pitch_rad`)."""
+        return math.degrees(self.pitch_rad)
 
     @property
-    def targetPitch_deg(self) -> float: return math.degrees(self.targetPitch_rad)
+    def pitchVel_dps(self) -> float:
+        """float: Current pitch angular rate in degrees/sec (derived from `pitchVel_rps`)."""
+        return math.degrees(self.pitchVel_rps)
+
+    @property
+    def targetPitch_deg(self) -> float:
+        """float: Target pitch in degrees (derived from `targetPitch_rad`)."""
+        return math.degrees(self.targetPitch_rad)
 
     @targetPitch_deg.setter
-    def targetPitch_deg(self, targetPitch_deg): self.targetPitch_rad = math.radians(targetPitch_deg)
+    def targetPitch_deg(self, targetPitch_deg):
+        """Set the target pitch from degrees, storing it as `targetPitch_rad`."""
+        self.targetPitch_rad = math.radians(targetPitch_deg)
 
     @property
-    def pitchError_deg(self) -> float: return math.degrees(self.pitchError_rad)
+    def pitchError_deg(self) -> float:
+        """float: Pitch error (target minus actual) in degrees."""
+        return math.degrees(self.pitchError_rad)
 
     @property
-    def roll_deg(self) -> float: return math.degrees(self.roll_rad)
+    def roll_deg(self) -> float:
+        """float: Current absolute roll in degrees (derived from `roll_rad`)."""
+        return math.degrees(self.roll_rad)
 
     @property
-    def rollVel_dps(self) -> float: return math.degrees(self.rollVel_rps)
+    def rollVel_dps(self) -> float:
+        """float: Current roll angular rate in degrees/sec (derived from `rollVel_rps`)."""
+        return math.degrees(self.rollVel_rps)
 
     @property
-    def targetRoll_deg(self) -> float: return math.degrees(self.targetRoll_rad)
+    def targetRoll_deg(self) -> float:
+        """float: Target roll in degrees (derived from `targetRoll_rad`)."""
+        return math.degrees(self.targetRoll_rad)
 
     @targetRoll_deg.setter
-    def targetRoll_deg(self, targetRoll_deg): self.targetRoll_rad = math.radians(targetRoll_deg)
+    def targetRoll_deg(self, targetRoll_deg):
+        """Set the target roll from degrees, storing it as `targetRoll_rad`."""
+        self.targetRoll_rad = math.radians(targetRoll_deg)
 
     @property
-    def rollError_deg(self) -> float: return math.degrees(self.rollError_rad)
+    def rollError_deg(self) -> float:
+        """float: Roll error (target minus actual) in degrees."""
+        return math.degrees(self.rollError_rad)

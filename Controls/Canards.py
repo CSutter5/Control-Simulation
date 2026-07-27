@@ -5,11 +5,30 @@ import pandas as pd
 import numpy as np
 
 from .Controls import Controls
+# NOTE: intentionally an absolute import, not `from .Rocket import Rocket`.
+# Controls/ and Rocket/ are sibling packages with no shared parent package,
+# so a relative import cannot cross that boundary — this requires Rocket/
+# to be installed/importable on sys.path (see pyproject.toml packages.find)
+# and Rocket/__init__.py to expose the Rocket class. Mixing this up caused
+# import errors previously; see project notes/TODO.md before "fixing" this
+# to `.Rocket` again.
 from Rocket import Rocket
 
 class Canards(Controls):
     """
-    Canards Control Object
+    Canards control implementation: computes roll torque by modeling
+    aerodynamic lift on a set of canard fins deflected to a commanded angle.
+
+    Lift is looked up from a CSV-based table of C_L values (indexed by angle
+    of attack and velocity) via linear interpolation, then converted to a
+    torque about the roll axis using the canard offset from the rocket's
+    centerline. The commanded angle is rate-limited and clamped to
+    `maxAngle_rad` on every write, modeling a physically realistic actuator
+    (finite slew rate and maximum deflection) rather than an ideal one.
+
+    Only roll torque is currently produced — `sim()` always returns
+    (0.0, 0.0, rollTorque_Nm) — consistent with the project's current focus
+    on roll-only dynamics (see README).
 
     Attributes:
         airfoilDataPath (str): The path to a table of C_L for different velocities and AOA's
@@ -19,7 +38,7 @@ class Canards(Controls):
         sweep_m (float): Sweep of the canards in meters
         numCanards (float): Number of canards
         offset_m (float): Distance from the center axis to the canards in meters
-        maxAngle_dar (float): Max deflection angle of the canards in radians
+        maxAngle_rad (float): Max deflection angle of the canards in radians
         rateLimit_rps (float): Max angular speed of the canards in radians / sec
         updateFreq_hz (float): Update frequency of the canards in hz
         angle_rad (float): The canard current angle in radians
@@ -45,8 +64,8 @@ class Canards(Controls):
     updateFreq_hz:  float
 
 
-    _angle_rad:   float = 0.0
-    dt:                 float = 0.0
+    _angle_rad: float = 0.0
+    _dt:        float = 0.0
 
     def __init__(self, airfoilDataPath: str, root_m: float, tip_m: float, span_m: float,
         sweep_m: float, numCanards: float, offset_m: float, maxAngle_deg: float, rateLimit_dps: float,
@@ -94,10 +113,28 @@ class Canards(Controls):
 
     @property
     def angle_rad(self) -> float:
+        """float: The canard's current actual angle in radians (read-only view of `_angle_rad`)."""
         return self._angle_rad
 
     @angle_rad.setter
     def angle_rad(self, angle):
+        """
+        Set a new commanded canard angle, subject to rate limiting and
+        max-angle clamping.
+
+        This models a physical actuator rather than an ideal one: the
+        canard cannot jump instantly to `angle`. Instead, the change from
+        the current `_angle_rad` to the requested `angle` is limited to
+        `rateLimit_rps * self._dt` per call (i.e. per simulation step), so
+        `_dt` must be set to the current step's `simTimeStep` (done in
+        `sim()`) before assigning here for the rate limit to be meaningful.
+        The result is then clamped to +/-`maxAngle_rad`.
+
+        Args:
+            angle (float): Requested canard angle in radians. May be
+                reached gradually over multiple steps rather than
+                immediately, depending on `rateLimit_rps` and `_dt`.
+        """
         maxChange = self.rateLimit_rps * self._dt # Calculate the max rate of change
 
         self.angleRate_rps = angle - self._angle_rad # Calculate the target rate of change
@@ -108,16 +145,29 @@ class Canards(Controls):
 
     def sim(self, rocket: Rocket, **kwargs) -> tuple[float, float, float]:
         """
-        Simulate the canards
+        Simulate the canards for one step and return the resulting torque.
+
+        Updates the commanded angle (subject to rate limiting, see
+        `angle_rad` setter) from `kwargs['canardAngle_deg']`, computes fin
+        lift for the rocket's current vertical velocity and air density via
+        `__calculateFinLift`, and converts that lift into a roll torque
+        using the canard offset and count. Only roll torque is produced;
+        yaw and pitch are always returned as 0.0.
 
         Args:
-            dt (float): The change in time since the last step in seconds
+            rocket (Rocket): The rocket this control is attached to. Used
+                for `rocket.simTimeStep` (to rate-limit the angle change)
+                and, via `__calculateFinLift`, `rocket.zVel_mps` and
+                `rocket.airDensity`.
+            **kwargs: Must include `canardAngle_deg` (float) — the
+                commanded canard deflection angle in degrees for this step.
 
         Raises:
-            TypeError
+            TypeError: If `canardAngle_deg` is not present in `kwargs`.
 
         Returns:
-            tuple[float, float, float]: Tuple of toques generated by the control [yaw, pitch, roll] in Nm
+            tuple[float, float, float]: (0.0, 0.0, rollTorque_Nm) — the
+                roll torque generated by the canards this step, in Nm.
         """
 
         if not ("canardAngle_deg" in kwargs.keys()):
@@ -136,21 +186,25 @@ class Canards(Controls):
         """
         Calculate the lift of the canard for the current AOA and rocket vertical velocity
 
+        Looks up C_L for the current absolute deflection angle (in degrees)
+        and the rocket's vertical velocity via the CSV-derived
+        `_liftInterpFunc`, then converts it to a lift force using the
+        standard dynamic-pressure lift equation
+        (L = C_L * 0.5 * v^2 * rho * area).
+
         Args:
             rocket (Rocket): The rocket that this is attached to
 
         Returns:
-            float: The lift generated by the canard
+            float: The lift generated by the canard. Returns 0 if the
+                angle/velocity pair falls outside the interpolator's known
+                range (see NOTE below on the current dead check for this).
         """
 
         cl = self._liftInterpFunc(abs(math.degrees(self._angle_rad)), rocket.zVel_mps)
-        cl = float(cl) if not np.isnan(cl) else math.nan
-
-        if cl == "Out of bounds":
-            # print(f"Warning: Angle {math.degrees(angle):.2f} degrees and velocity {airspeed:.2f} m/s are out of bounds for the CL interpolator.")
-            # If the angle and velocity are outside the range of the CSV, we can assume the coefficient of lift is 0
-            #   Its either a low AOA or slow speed, its an assumption that may or maynot hold up
-            return 0
+        # If the angle and velocity are outside the range of the CSV, we can assume the coefficient of lift is 0
+        #   Its either a low AOA or slow speed, its an assumption that may or maynot hold up
+        cl = float(cl) if not np.isnan(cl) else 0.0
         
         generatedLift = cl * 0.5 * rocket.zVel_mps**2 * rocket.airDensity * self._surfaceArea_m2
 
@@ -158,5 +212,5 @@ class Canards(Controls):
 
     @property
     def angle_deg(self) -> float:
+        """float: The canard's current actual angle in degrees (derived from `_angle_rad`)."""
         return math.degrees(self._angle_rad)
-
