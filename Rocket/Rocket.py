@@ -1,4 +1,5 @@
 from typing import Callable
+import random
 import math
 
 from scipy.spatial.transform import Rotation
@@ -373,6 +374,11 @@ class Rocket:
         r = Rotation.from_quat([x, y, z, w])  # scipy wants scalar-last order
         yaw_rad, pitch_rad, roll_rad = r.as_euler('xyz', degrees=False)
         return yaw_rad, pitch_rad, roll_rad
+
+    def randomize(self):
+
+        self.rollAngle_rad = random.uniform(-math.pi, math.pi)
+        self.rollVelocity_rps = random.uniform(0, 20)
 
     @property
     def yaw_deg(self) -> float:

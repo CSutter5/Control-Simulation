@@ -63,7 +63,6 @@ class Canards(Controls):
     rateLimit_rps:  float
     updateFreq_hz:  float
 
-
     _angle_rad: float = 0.0
     _dt:        float = 0.0
 
