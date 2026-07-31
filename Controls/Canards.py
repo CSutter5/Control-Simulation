@@ -26,10 +26,6 @@ class Canards(Controls):
     `maxAngle_rad` on every write, modeling a physically realistic actuator
     (finite slew rate and maximum deflection) rather than an ideal one.
 
-    Only roll torque is currently produced — `sim()` always returns
-    (0.0, 0.0, rollTorque_Nm) — consistent with the project's current focus
-    on roll-only dynamics (see README).
-
     Attributes:
         airfoilDataPath (str): The path to a table of C_L for different velocities and AOA's
         root_m (float): Root coord of the canards in meters

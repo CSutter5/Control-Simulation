@@ -15,11 +15,16 @@ timestep at a time. `Controls` objects implement a common interface —
 and the rocket polls every attached control each step, sums their torques,
 and integrates its state forward.
 
-At the moment, the reference implementation is a canard-based roll
-controller (`Controls/Canards.py`), driven by aerodynamic lift estimated
-from an airfoil CSV lookup table with actuator rate limiting. The
-architecture is intended to support reaction wheels and other control
-surfaces alongside or instead of canards.
+Two control mechanisms are currently implemented:
+- A canard-based roll controller (`Controls/Canards.py`), driven by
+  aerodynamic lift estimated from an airfoil CSV lookup table with
+  actuator rate limiting.
+- A reaction-wheel roll controller (`Controls/ReactionWheel.py`), driven by
+  conservation of angular momentum as an internal flywheel is spun up and
+  down toward a commanded speed, with motor acceleration limiting.
+
+The architecture is intended to support additional control surfaces
+alongside or instead of these.
 
 ## Current Status
 
@@ -36,6 +41,12 @@ surfaces alongside or instead of canards.
   velocity (`zVel_mps`) and air density from the sim data CSV. Lateral
   position targets/errors exist in the API but aren't exercised by the
   current physics model.
+- **Reaction wheel PID gains** in the example (`ReactionWheelRocket.py`)
+  are negative, unlike the canard example's positive gains — this is
+  expected, since a reaction wheel's reaction torque opposes its own
+  angular acceleration (see `Controls/ReactionWheel.py`). If you rework the
+  wheel's inertia, direction convention, or timestep, re-tune these gains
+  rather than assuming they still produce a stable response.
 
 See `TODO.md` for a running list of known issues and their status.
 
@@ -49,15 +60,26 @@ See `TODO.md` for a running list of known issues and their status.
   implement.
 - `Controls/Canards.py` — canard model: aerodynamic lift from an airfoil CSV
   lookup, rate-limited and clamped actuator angle, roll-only torque output.
-- `Controls/ReactionWheel.py` — placeholder for a future reaction wheel
-  implementation.
-- `example/CRL2026/` — reference example scenario:
-  - `CRL2026_Canards.py` — builds a `Rocket` + `Canards`, drives a scripted
+- `Controls/ReactionWheel.py` — reaction wheel model: an internal flywheel
+  spun toward a commanded speed with motor-acceleration limiting; roll
+  torque is the equal-and-opposite reaction to the wheel's own angular
+  acceleration (conservation of angular momentum), roll-only torque output.
+- `example/CanardControl/` — reference example scenario:
+  - `CanardRocket.py` — builds a `Rocket` + `Canards`, drives a scripted
     roll maneuver with a PID controller, and plots the result. Start here
     when building a new scenario or control mechanism.
-  - `Canard_Rocket.csv` — time-indexed flight/environment data (`zVel_mps`,
+  - `.csv` — time-indexed flight/environment data (`zVel_mps`,
     `airDensity`) used to drive the example.
   - `airfoil/` — airfoil lift-coefficient (C_L) tables used by `Canards`.
+- `example/ReactionWheelControl/` — reference example scenario for the
+  reaction wheel:
+  - `ReactionWheelRocket.py` — builds a `Rocket` + `ReactionWheel`, drives
+    the same scripted roll maneuver with a PID controller, and plots
+    rocket angle vs. target vs. error alongside wheel speed vs. rocket
+    angular velocity.
+  - `.csv` — time-indexed flight/environment data used to drive the
+    example (no airfoil table is needed, since the reaction wheel has no
+    aerodynamic dependency).
 
 ## Installation
 
@@ -68,16 +90,23 @@ pip install -r requirements.txt
 python -m pip install --user -e . --break-system-packages
 ```
 
-## Running the Example
+## Running the Examples
 
 ```bash
-cd example/CRL2026/
-python CRL2026_Canards.py
+cd example/CanardControl/
+python CanardRocket.py
 ```
 
-This runs the scripted roll maneuver described in `CRL2026_Canards.py`
-(hold 0°, ramp to 90°, hold, ramp back down) and plots rocket angle vs.
-target vs. error, canard deflection, and airspeed/air density over time.
+```bash
+cd example/ReactionWheelControl/
+python ReactionWheelRocket.py
+```
+
+Both run the same scripted roll maneuver (hold 0°, ramp to 90°, hold, ramp
+back down) using their respective control mechanism, and plot rocket angle
+vs. target vs. error alongside a second view of the controlling actuator's
+own state (canard deflection and airspeed/air density for `CanardRocket.py`;
+wheel speed vs. rocket angular velocity for `ReactionWheelRocket.py`).
 
 ## How the Simulation Works
 
@@ -95,21 +124,22 @@ target vs. error, canard deflection, and airspeed/air density over time.
   position/attitude error terms against the target state.
 - `**kwargs` passed into `rocket.sim(...)` are forwarded unchanged to every
   control's `sim()` — e.g. a `Canards` control requires a `canardAngle_deg`
-  keyword each step (see the PID loop in `CRL2026_Canards.py` for a working
-  example).
+  keyword, and a `ReactionWheel` control requires a `wheelSpeed_deg`
+  keyword, each step (see the PID loops in `CanardRocket.py` and
+  `ReactionWheelRocket.py` for working examples).
 
 ## Extending the Project
 
 - **Add a new control mechanism** by subclassing `Controls` and overriding
   `sim(self, rocket, **kwargs)` to return a torque tuple. See
   `Controls/Controls.py` for the full subclassing contract, and
-  `Controls/Canards.py` as a worked example.
+  `Controls/Canards.py` or `Controls/ReactionWheel.py` as worked examples.
 - **Combine multiple controls** by passing several objects into the
   rocket's `controls` list — their torques are summed automatically.
 - **Build a new example scenario** by copying the pattern in
-  `CRL2026_Canards.py`: build your control(s), build a `Rocket` with a
-  `targetFunc`, call `rocket.reset()`, then loop `while rocket.running:`
-  calling `rocket.sim(**your_inputs)` each step.
+  `CanardRocket.py` or `ReactionWheelRocket.py`: build your control(s),
+  build a `Rocket` with a `targetFunc`, call `rocket.reset()`, then loop
+  `while rocket.running:` calling `rocket.sim(**your_inputs)` each step.
 - **Improve the aerodynamic model** by replacing the CSV lookup in
   `Canards` with a higher-fidelity physics model.
 - **Add sensors, latency, or actuator dynamics** for more realistic control

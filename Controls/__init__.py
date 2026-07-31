@@ -4,3 +4,4 @@ __all__ = ["Controls", "Canards"]
 # Import the submodules
 from .Controls import Controls
 from .Canards import Canards
+from .ReactionWheel import ReactionWheel
