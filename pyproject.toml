@@ -17,4 +17,4 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["properties*", "environments*", "example*"]
+include = ["Controls*", "Rocket*", "example*"]

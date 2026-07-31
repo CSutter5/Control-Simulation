@@ -1,4 +1,4 @@
-time,speed,density
+time,zVel_mps,airDensity
 0,0,1.19
 0.01,0,1.19
 0.02,0,1.19
