@@ -1,5 +1,5 @@
 """
-CRL2026 Canard Roll-Control Demo
+Canard Roll-Control Demo
 ================================
 
 This is the reference example for using this project: it builds a single
@@ -8,10 +8,10 @@ simple PID controller trying to hit a scripted roll-angle target, and plots
 the result. If you're adding a new scenario or a new control mechanism,
 this file is the intended starting point to copy and modify.
 
-Run from the `example/CRL2026/` directory (paths below are relative to it):
+Run from the `example/CanardsControl/` directory (paths below are relative to it):
 
-    cd example/CRL2026/
-    python CRL2026_Canards.py
+    cd example/CanardsControl/
+    python CanardRocket.py
 
 What this script does, in order:
     1. Defines `target(time_s)` — the desired trajectory as a function of
@@ -118,7 +118,7 @@ TIMESTEP = 0.01
 # and how fast the canards can physically deflect). See Controls/Canards.py
 # for how these are used.
 canards = Controls.Canards(
-    airfoilDataPath="airfoil/0012_airfoil_data.csv", # Table of Cl for different velocities and aoa's
+    airfoilDataPath="NACA0012.csv", # Table of Cl for different velocities and aoa's
     root_m=0.0635,
     tip_m=0.01905,
     span_m=0.0254,
@@ -134,8 +134,7 @@ canards = Controls.Canards(
 # Wires the canard control above into a Rocket along with the scripted
 # target function and a CSV of environment/flight data.
 rocket = Rocket.Rocket(
-    simDataPath="Canard_Rocket.csv", # Requiremets are dependent on the control methon used
-    # simDataPath="Test_Flight_Data.csv",
+    simDataPath="FlightProfile.csv", # Requiremets are dependent on the control methon used
     Ix_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the x-axis
     Iy_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the y-axis
     Iz_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the z-axis
