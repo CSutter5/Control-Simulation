@@ -376,7 +376,6 @@ class Rocket:
         return yaw_rad, pitch_rad, roll_rad
 
     def randomize(self):
-
         self.rollAngle_rad = random.uniform(-math.pi, math.pi)
         self.rollVelocity_rps = random.uniform(0, 20)
 
