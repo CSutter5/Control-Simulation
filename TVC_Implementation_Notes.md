@@ -22,6 +22,6 @@
 
 - Gravity
 
-- Graphing built into the tool
-    - Need to have the sim tool log all the data 
-    - Multiply functions for different plots
+- ~~Graphing built into the tool~~ Implemented
+    - ~~Need to have the sim tool log all the data~~
+    - ~~Multiply functions for different plots~~

@@ -5,7 +5,7 @@
 1. TVC
 2. Full 6DOF Simulation
 3. Multi-axis aero control
-4. Graphing
+4. ~~Graphing~~
 5. Airbrakes (using lookup table should be relativity simple)
 
 ### Infeasible / Very Long Term
