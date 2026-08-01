@@ -172,17 +172,12 @@ def plot(df: pd.DataFrame):
     ax1.grid(True)
 
     # --- Plot 2: Wheel & Rocket Angular Velocity ---
-    ax2.plot(df['time'], df['wheelSpeed'],  color='red',   label='Wheel Speed')
+    ax2.plot(df['time'], df['wheelSpeed'],            color='red',   label='Wheel Speed')
+    ax2.plot(df['time'], df['rocketAngularVelocity'], color='green', label='Rocket Angular Velocity')
     ax2.set_xlabel('Time (s)')
     ax2.set_ylabel('Angular Velocity (Degree/Second)')
     ax2.legend(loc='upper right')
     ax2.grid(True)
-
-    ax2_2 = ax2.twinx()
-    ax2_2.plot(df['time'], df['rocketAngularVelocity'], color='green', label='Rocket Angular Velocity')
-    ax2_2.set_ylabel('Angular Velocity (Degree/Second)')
-    ax2_2.legend(loc='lower left')
-
     plt.tight_layout()
     plt.show()
 
