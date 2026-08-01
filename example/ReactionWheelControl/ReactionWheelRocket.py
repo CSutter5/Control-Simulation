@@ -44,7 +44,6 @@ assuming they'll still produce a stable response.
 import math
 
 import matplotlib.pyplot as plt
-import pandas as pd
 
 import Controls
 import Rocket
@@ -141,46 +140,6 @@ rocket = Rocket.Rocket(
     ]
 )
 
-# --- Plotting ---
-def plot(df: pd.DataFrame):
-    """
-    Plot the logged simulation run.
-
-    Expects `df` to have been built the same way as in the `__main__`
-    block below, i.e. with columns 'time', 'targetAngle', 'rocketAngle',
-    'rocketAngularVelocity', 'wheelSpeed', and 'error' (angles in degrees,
-    angular velocities in degrees/sec). Produces two side-by-side subplots:
-        1. Rocket roll angle vs. target roll angle vs. error, in degrees.
-        2. Reaction wheel speed (left axis) vs. rocket roll angular
-           velocity (right axis), both in degrees/sec.
-
-    Args:
-        df (pd.DataFrame): The logged run, one row per simulation step.
-
-    Returns:
-        None. Calls `plt.show()` to display the figure.
-    """
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
-
-    # --- Plot 1: Rocket angle + Target angle ---
-    ax1.plot(df['time'], df['rocketAngle'], color='black', label='Rocket Angle')
-    ax1.plot(df['time'], df['targetAngle'], color='blue',  label='Target Angle')
-    ax1.plot(df['time'], df['error'],       color='red',   label='Error')
-    ax1.set_xlabel('Time (s)')
-    ax1.set_ylabel('Angle (deg)')
-    ax1.legend(loc='lower left')
-    ax1.grid(True)
-
-    # --- Plot 2: Wheel & Rocket Angular Velocity ---
-    ax2.plot(df['time'], df['wheelSpeed'],            color='red',   label='Wheel Speed')
-    ax2.plot(df['time'], df['rocketAngularVelocity'], color='green', label='Rocket Angular Velocity')
-    ax2.set_xlabel('Time (s)')
-    ax2.set_ylabel('Angular Velocity (Degree/Second)')
-    ax2.legend(loc='upper right')
-    ax2.grid(True)
-    plt.tight_layout()
-    plt.show()
-
 if __name__ == "__main__":
     # Reset the rocket to t=0 before starting the run. Since `rocket` is a
     # module-level object constructed once above, calling reset() here
@@ -188,22 +147,6 @@ if __name__ == "__main__":
     # safely re-runnable / importable without side effects from
     # construction alone.
     rocket.reset()
-
-    df = pd.DataFrame(columns=[
-        'time', 'targetAngle', 'rocketAngle', 'rocketAngularVelocity',
-        'wheelSpeed', 'error'
-    ])
-
-    # Log the initial (t=0) state before the loop starts, so the plots
-    # include the starting point.
-    df.loc[0] = {
-        'time':                  rocket.simTime,
-        'targetAngle':           rocket.targetRoll_deg,
-        'rocketAngle':           rocket.roll_deg,
-        'rocketAngularVelocity': rocket.rollVel_dps,
-        'wheelSpeed':           wheel.speed_dps,
-        'error':                 rocket.rollError_deg
-    }
 
     # --- PID gains for the roll controller ---
     # Negative here (unlike Canards' positive gains) because a reaction
@@ -254,13 +197,10 @@ if __name__ == "__main__":
             wheelSpeed_deg=pid
         )
 
-        df.loc[len(df)] = {
-            'time':                  rocket.simTime,
-            'targetAngle':           rocket.targetRoll_deg,
-            'rocketAngle':           rocket.roll_deg,
-            'rocketAngularVelocity': rocket.rollVel_dps,
-            'wheelSpeed':           wheel.speed_dps,
-            'error':                 rocket.rollError_deg
-        }
+    fig, axis = plt.subplots(4, 1, figsize=(12, 5), sharey=False)
 
-    plot(df)
+    rocket.plotRoll(axis[0], axis[1])
+    wheel.plot(axis[2], axis[3])
+
+    plt.tight_layout()
+    plt.show()

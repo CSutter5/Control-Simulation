@@ -3,6 +3,7 @@ import random
 import math
 
 from scipy.spatial.transform import Rotation
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
@@ -67,6 +68,7 @@ class Rocket:
             becomes False. Defaults to 15.
         simTime (float): Elapsed simulation time in seconds.
         running (bool): False once `simTime` reaches `simStop`.
+        df (pd.DataFrame): Pandas DataFrame containing sim data.
     """
 
     simDataPath:    str
@@ -86,15 +88,15 @@ class Rocket:
 
     xPos_m    = 0.0
     xVel_mps  = 0.0
-    xZcc_mps2 = 0.0
+    xAcc_mps2 = 0.0
 
     yPos_m    = 0.0
     yVel_mps  = 0.0
-    yZcc_mps2 = 0.0
+    yAcc_mps2 = 0.0
 
     zPos_m    = 0.0
     zVel_mps  = 0.0
-    zZcc_mps2 = 0.0
+    zAcc_mps2 = 0.0
 
     yaw_rad    = 0.0
     yawVel_rps = 0.0
@@ -122,6 +124,20 @@ class Rocket:
     simStop = 15
     simTime = 0.0
     running = True
+
+    df = pd.DataFrame(columns=[
+        "time_s", 
+        "xPos_m", "xVel_mps", "xAcc_mps2",
+        "yPos_m", "yVel_mps", "yAcc_mps2",
+        "zPos_m", "zVel_mps", "zAcc_mps2",
+        "yaw_rad", "yawVel_rps",
+        "pitch_rad", "pitchVel_rps",
+        "roll_rad", "rollVel_rps",
+        "targetXPos_m", "targetYPos_m", "targetZPos_m",
+        "targetYaw_rad", "targetPitch_rad", "targetRoll_rad",
+        "xPosError_m", "yPosError_m", "zPosError_m",
+        "yawError_rad", "pitchError_rad", "rollError_rad"
+    ])
 
     def __init__(self, simDataPath: str, 
         Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: 
@@ -183,6 +199,8 @@ class Rocket:
 
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
 
+        self.df = self.df.set_index("time_s")
+
     def reset(self):
         """
         Reset the rocket to its initial simulation state.
@@ -209,7 +227,99 @@ class Rocket:
         self.pitchVel_rps = 0.0
         self.rollVel_rps = 0.0
 
+        self.df = pd.DataFrame(columns=self.df.columns)
+        self.df.index.name = "time_s"
+
         return
+
+    def sim(self, **kwargs):
+        """
+        Advance the simulation by one `simTimeStep`.
+
+        Steps `simTime` forward, refreshes environment data, evaluates
+        `targetFunc` for the new time, polls every control in `controls`
+        (passing `rocket=self` and any `**kwargs` through to each control's
+        `sim()`), sums the returned per-control torque tuples, applies the
+        aggregate torque via `_applyTorques`, updates the derived Euler
+        angles, and recomputes position/attitude error terms against the
+        target state.
+
+        Args:
+            **kwargs: Forwarded unchanged to every control's `sim()` call.
+                For example, a `Canards` control requires a
+                `canardAngle_deg` keyword argument here.
+
+        Note:
+            The README describes yaw/pitch dynamics as not yet implemented
+            and states that a non-zero yaw or pitch torque should raise an
+            error. That guard is not currently present in `_applyTorques`
+            or here — yaw/pitch torques are applied the same as roll. If
+            you're relying on that documented behavior, treat it as a
+            pending TODO rather than existing protection.
+
+        Returns:
+            None
+        """
+        self.simTime += self.simTimeStep
+        self.running = self.simTime < self.simStop
+
+
+        self._updateAllSimData()
+
+        self.targetXPos_m, self.targetYPos_m, self.targetZPos_m, self.targetYaw_deg, self.targetPitch_deg, self.targetRoll_deg = self.targetFunc(self.simTime)
+
+        yawTorque_Nm    = 0.0
+        pitchTorque_Nm  = 0.0
+        rollTorque_Nm   = 0.0
+
+        for control in self.controls:
+            torques = control.sim(rocket=self, **kwargs)
+            yawTorque_Nm    += torques[0]
+            pitchTorque_Nm  += torques[1]
+            rollTorque_Nm   += torques[2]
+
+        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
+
+        self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
+
+        self.posXError_m = self.targetXPos_m - self.xPos_m
+        self.posYError_m = self.targetYPos_m - self.yPos_m
+        self.posZError_m = self.targetZPos_m - self.zPos_m
+
+        self.yawError_rad   = self.targetYaw_rad - self.yaw_rad
+        self.pitchError_rad = self.targetPitch_rad - self.pitch_rad
+        self.rollError_rad  = self.targetRoll_rad - self.roll_rad
+        
+        self.df.loc[self.simTime] = {
+            "time_s":           self.simTime,
+            "xPos_m":           self.xPos_m,
+            "xVel_mps":         self.xVel_mps,
+            "xAcc_mps2":        self.xAcc_mps2,
+            "yPos_m":           self.yPos_m,
+            "yVel_mps":         self.yVel_mps,
+            "yAcc_mps2":        self.yAcc_mps2,
+            "zPos_m":           self.zPos_m,
+            "zVel_mps":         self.zVel_mps,
+            "zAcc_mps2":        self.zAcc_mps2,
+            "yaw_rad":          self.yaw_rad,
+            "yawVel_rps":       self.yawVel_rps,
+            "pitch_rad":        self.pitch_rad,
+            "pitchVel_rps":     self.pitchVel_rps,
+            "roll_rad":         self.roll_rad,
+            "rollVel_rps":      self.rollVel_rps,
+            "targetXPos_m":     self.targetXPos_m,
+            "targetYPos_m":     self.targetYPos_m,
+            "targetZPos_m":     self.targetZPos_m,
+            "targetYaw_rad":    self.targetYaw_rad,
+            "targetPitch_rad":  self.targetPitch_rad,
+            "targetRoll_rad":   self.targetRoll_rad,
+            "xPosError_m":      self.xPosError_m,
+            "yPosError_m":      self.yPosError_m,
+            "zPosError_m":      self.zPosError_m,
+            "yawError_rad":     self.yawError_rad,
+            "pitchError_rad":   self.pitchError_rad,
+            "rollError_rad":    self.rollError_rad
+        }
 
     def _updateAllSimData(self):
         """
@@ -253,63 +363,6 @@ class Rocket:
 
         idx = (self.simData['time'] - time).abs().idxmin()
         return self.simData.loc[idx, columnName]
-
-    def sim(self, **kwargs):
-        """
-        Advance the simulation by one `simTimeStep`.
-
-        Steps `simTime` forward, refreshes environment data, evaluates
-        `targetFunc` for the new time, polls every control in `controls`
-        (passing `rocket=self` and any `**kwargs` through to each control's
-        `sim()`), sums the returned per-control torque tuples, applies the
-        aggregate torque via `_applyTorques`, updates the derived Euler
-        angles, and recomputes position/attitude error terms against the
-        target state.
-
-        Args:
-            **kwargs: Forwarded unchanged to every control's `sim()` call.
-                For example, a `Canards` control requires a
-                `canardAngle_deg` keyword argument here.
-
-        Note:
-            The README describes yaw/pitch dynamics as not yet implemented
-            and states that a non-zero yaw or pitch torque should raise an
-            error. That guard is not currently present in `_applyTorques`
-            or here — yaw/pitch torques are applied the same as roll. If
-            you're relying on that documented behavior, treat it as a
-            pending TODO rather than existing protection.
-
-        Returns:
-            None
-        """
-        self.simTime += self.simTimeStep
-        self.running = self.simTime < self.simStop
-
-        self._updateAllSimData()
-
-        self.targetXPos_m, self.targetYPos_m, self.targetZPos_m, self.targetYaw_deg, self.targetPitch_deg, self.targetRoll_deg = self.targetFunc(self.simTime)
-
-        yawTorque_Nm    = 0.0
-        pitchTorque_Nm  = 0.0
-        rollTorque_Nm   = 0.0
-
-        for control in self.controls:
-            torques = control.sim(rocket=self, **kwargs)
-            yawTorque_Nm    += torques[0]
-            pitchTorque_Nm  += torques[1]
-            rollTorque_Nm   += torques[2]
-
-        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
-
-        self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
-
-        self.posXError_m = self.targetXPos_m - self.xPos_m
-        self.posYError_m = self.targetYPos_m - self.yPos_m
-        self.posZError_m = self.targetZPos_m - self.zPos_m
-
-        self.yawError_rad   = self.targetYaw_rad - self.yaw_rad
-        self.pitchError_rad = self.targetPitch_rad - self.pitch_rad
-        self.rollError_rad  = self.targetRoll_rad - self.roll_rad
 
     def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float) -> None:
         """
@@ -453,3 +506,42 @@ class Rocket:
     def rollError_deg(self) -> float:
         """float: Roll error (target minus actual) in degrees."""
         return math.degrees(self.rollError_rad)
+
+    def plotRoll(self, ax1:any=None, ax2:any=None) -> None:
+        """
+        Plots the recorded sim data
+
+        Args:
+            ax1 (any, optional): First External Plot Axis. Defaults to None.
+            ax2 (any, optional): Second External Plot Axis. Defaults to None.
+        """
+        
+        importedAxis = True
+
+        if ax1 is None or ax2 is None:
+            importedAxis = False
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5), sharey=False)
+            
+        self.df['roll_deg']       = self.df.apply(lambda row: math.degrees(row.roll_rad), axis=1)
+        self.df['targetRoll_deg'] = self.df.apply(lambda row: math.degrees(row.targetRoll_rad), axis=1)
+        self.df['rollError_deg']  = self.df.apply(lambda row: math.degrees(row.rollError_rad), axis=1)
+        ax1.plot(self.df.index, self.df['roll_deg'],       color='black', label='Rocket Roll Angle')
+        ax1.plot(self.df.index, self.df['targetRoll_deg'], color='blue',  label='Target Roll Angle')
+        ax1.plot(self.df.index, self.df['rollError_deg'],  color='red',   label='Roll Error')
+        ax1.set_xlabel('Time (s)')
+        ax1.set_ylabel('Angle (Degrees)')
+        ax1.legend(loc='lower left')
+        ax1.grid(True)
+
+        self.df['rollVel_dps'] = self.df.apply(lambda row: math.degrees(row.rollVel_rps), axis = 1)
+        ax2.plot(self.df.index, self.df['rollVel_dps'],  color='red',   label='Rocket Roll Velocity')
+        ax2.set_xlabel('Time (s)')
+        ax2.set_ylabel('Angular Speed (Degrees / Second)')
+        ax2.legend(loc='lower left')
+        ax2.grid(True)
+
+        if not importedAxis:
+            plt.tight_layout()
+            plt.show()
+
+        return

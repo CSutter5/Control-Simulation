@@ -43,7 +43,6 @@ If you're building a new example, the pattern to follow is:
 import math
 
 import matplotlib.pyplot as plt
-import pandas as pd
 
 import Controls
 import Rocket
@@ -148,64 +147,6 @@ rocket = Rocket.Rocket(
     ]
 )
 
-# --- Plotting ---
-def plot(df: pd.DataFrame):
-    """
-    Plot the logged simulation run.
-
-    Expects `df` to have been built the same way as in the `__main__` block
-    below, i.e. with columns 'time', 'targetAngle', 'rocketAngle', 'error',
-    'canardAngle', 'airSpeed', and 'airDensity' (all in the units named,
-    degrees for angles). Produces three stacked subplots:
-        1. Rocket roll angle vs. target roll angle vs. error, in degrees.
-        2. Canard deflection angle, in degrees.
-        3. Airspeed (m/s) with air density (kg/m^3) on a secondary y-axis.
-
-    Note: `df` also carries a 'rocketAngularVelocity' column (logged in the
-    main loop below) that isn't plotted here — it's collected but currently
-    unused, in case you want to add a fourth subplot for it.
-
-    Args:
-        df (pd.DataFrame): The logged run, one row per simulation step.
-
-    Returns:
-        None. Calls `plt.show()` to display the figure.
-    """
-    fig, axs = plt.subplots(3, 1, figsize=(14, 5), sharey=False)
-
-    # --- Plot 1: Rocket angle + Target angle ---
-    axs[0].plot(df['time'], df['rocketAngle'], color='black', label='Rocket Angle')
-    axs[0].plot(df['time'], df['targetAngle'], color='blue',  label='Target Angle')
-    axs[0].plot(df['time'], df['error'],       color='red',   label='Error')
-    axs[0].set_xlabel('Time (s)')
-    axs[0].set_ylabel('Angle (deg)')
-    axs[0].legend(loc='lower left')
-    axs[0].grid(True)
-
-    # --- Plot 2: Canard Deflection Angle ---
-    axs[1].plot(df['time'], df['canardAngle'], color='red', label='Canard Deflection Angle')
-    axs[1].set_xlabel('Time (s)')
-    axs[1].set_ylabel('Canard Angle (deg)')
-    axs[1].legend(loc='lower left')
-    axs[1].grid(True)
-
-    # --- Plot 3: Airspeed ---
-    axs[2].plot(df['time'], df['airSpeed'], color='red', label='Airspeed')
-    axs[2].set_xlabel('Time (s)')
-    axs[2].set_ylabel('Airspeed (m/s)')
-    axs[2].legend(loc='upper right')
-    axs[2].grid(True)
-
-    # Add Air Pressure to the airspeed plot
-    ax3_2 = axs[2].twinx()
-    ax3_2.plot(df['time'], df['airDensity'], color='blue', label='Air Density')
-    ax3_2.set_ylabel('Air Density (kg/m^3)')
-    ax3_2.legend(loc='lower left')
-
-    plt.tight_layout()
-    plt.show()
-
-
 if __name__ == "__main__":
     # Reset the rocket to t=0 before starting the run. Since `rocket` is a
     # module-level object constructed once above, calling reset() here
@@ -213,24 +154,6 @@ if __name__ == "__main__":
     # safely re-runnable / importable without side effects from
     # construction alone.
     rocket.reset()
-
-    df = pd.DataFrame(columns=[
-        'time', 'targetAngle', 'rocketAngle', 'rocketAngularVelocity',
-        'canardAngle', 'error', 'airSpeed', 'airDensity'
-    ])
-
-    # Log the initial (t=0) state before the loop starts, so the plots
-    # include the starting point.
-    df.loc[0] = {
-        'time':                  rocket.simTime,
-        'targetAngle':           rocket.targetRoll_deg,
-        'rocketAngle':           rocket.roll_deg,
-        'rocketAngularVelocity': rocket.rollVel_dps,
-        'canardAngle':           canards.angle_deg,
-        'error':                 rocket.rollError_deg,
-        'airSpeed':              rocket.zVel_mps,
-        'airDensity':            rocket.airDensity
-    }
 
     # --- PID gains for the roll controller ---
     # Tuned by hand for this specific rocket/canard geometry and timestep;
@@ -279,15 +202,10 @@ if __name__ == "__main__":
             canardAngle_deg=pid
         )
 
-        df.loc[len(df)] = {
-            'time':                  rocket.simTime,
-            'targetAngle':           rocket.targetRoll_deg,
-            'rocketAngle':           rocket.roll_deg,
-            'rocketAngularVelocity': rocket.rollVel_dps,
-            'canardAngle':           canards.angle_deg,
-            'error':                 rocket.rollError_deg,
-            'airSpeed':              rocket.zVel_mps,
-            'airDensity':            rocket.airDensity
-        }
+    fig, axis = plt.subplots(4, 1, figsize=(12, 5), sharey=False)
 
-    plot(df)
+    rocket.plotRoll(axis[0], axis[1])
+    canards.plot(axis[2], axis[3])
+
+    plt.tight_layout()
+    plt.show()
