@@ -39,3 +39,22 @@ class Force:
 
     vector_N: tuple[float, float, float]
     location_m: tuple[float, float, float]
+
+    def decomposeForce(self) -> tuple[float, float, float]:
+        """
+        Return this force's translational (location-independent)
+        contribution.
+
+        For a rigid body, a force's contribution to linear acceleration of
+        the CG doesn't depend on where on the body it's applied -- only its
+        contribution to rotation does (see `Rocket._torqueFromForce`, which
+        does use `location_m`). Lives here rather than on `Rocket` since it
+        needs nothing but the force itself -- no rocket state (e.g. `CG_m`)
+        is involved.
+
+        Returns:
+            tuple[float, float, float]: `vector_N` unchanged -- to be
+                summed with other forces into a net body-frame force and
+                consumed by `Rocket._applyForces`.
+        """
+        return self.vector_N

@@ -134,7 +134,9 @@ rocket = Rocket.Rocket(
             # of CG placement (see Controls/ReactionWheel.py), so 0 is fine here
     r_m=0.05,
     length_m=0,   # not used by the current (roll-only) physics model
-    mass_kg=0,    # not used by the current (roll-only) physics model
+    mass_kg=5,    # placeholder mass in kg -- now required (Rocket raises on
+                  # mass_kg=0) since net force is converted to acceleration
+                  # via F=ma; adjust to your actual rocket's mass
     targetFunc=target,
     simTimeStep=TIMESTEP,
     controls=[

@@ -57,9 +57,10 @@ class Rocket:
             velocity in meters and meters/sec.
         xForce_N/yForce_N/zForce_N (float): Net body-frame force left over
             each step after each control's force has had its torque
-            contribution extracted (`_torqueFromForce`). Recomputed every
-            `sim()` call but not yet integrated into acceleration,
-            velocity, or position -- see `_decomposeForce`.
+            contribution extracted (`_torqueFromForce`/
+            `Force.decomposeForce`). Recomputed every `sim()` call and
+            converted to world-frame acceleration by `_applyForces`, but
+            not yet integrated into velocity or position.
         yaw_rad/pitch_rad/roll_rad: Current absolute orientation in radians,
             derived from the internal orientation quaternion `self.q`.
         yawVel_rps/pitchVel_rps/rollVel_rps: Current body-frame angular
@@ -107,9 +108,9 @@ class Rocket:
     zAcc_mps2 = 0.0
 
     # Net body-frame force left over after torque has been extracted from
-    # each control's force via `_torqueFromForce`/`_decomposeForce` each
-    # step. Not yet integrated into acceleration/velocity/position -- see
-    # `_decomposeForce` docstring.
+    # each control's force via `_torqueFromForce`/`Force.decomposeForce`
+    # each step. Converted to world-frame acceleration by `_applyForces`,
+    # but not yet integrated into velocity/position.
     xForce_N = 0.0
     yForce_N = 0.0
     zForce_N = 0.0
@@ -140,6 +141,9 @@ class Rocket:
     simStop = 15
     simTime = 0.0
     running = True
+
+    # Standard gravity, applied along world-frame -z in _applyForces.
+    GRAVITY_MPS2 = 9.80665
 
     df = pd.DataFrame(columns=[
         "time_s", 
@@ -188,7 +192,7 @@ class Rocket:
             controls (list[Controls]): Control objects to poll each step.
 
         Raises:
-            ValueError: If any of Ix_kgm2, Iy_kgm2, or Iz_kgm2 is 0.
+            ValueError: If any of Ix_kgm2, Iy_kgm2, Iz_kgm2, or mass_kg is 0.
         """
         self.simDataPath = simDataPath
         self.simData = pd.read_csv(self.simDataPath)
@@ -196,6 +200,7 @@ class Rocket:
         if Ix_kgm2 == 0: raise ValueError("Ix_kgm2 must not be 0!")
         if Iy_kgm2 == 0: raise ValueError("Iy_kgm2 must not be 0!")
         if Iz_kgm2 == 0: raise ValueError("Iz_kgm2 must not be 0!")
+        if mass_kg == 0: raise ValueError("mass_kg must not be 0!")
 
         self.Ix_kgm2  = Ix_kgm2
         self.Iy_kgm2  = Iy_kgm2
@@ -300,20 +305,25 @@ class Rocket:
                 pitchTorque_Nm += pT
                 rollTorque_Nm  += rT
 
-                fx, fy, fz = self._decomposeForce(force)
+                fx, fy, fz = force.decomposeForce()
                 xForce_N += fx
                 yForce_N += fy
                 zForce_N += fz
 
-        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
-
         # Net body-frame force left over after torque has been extracted.
-        # Stored for now so a future translational-integration step (e.g.
-        # TVC thrust contributing to linear acceleration/velocity/position)
-        # can consume it -- not integrated into position/velocity yet.
         self.xForce_N = xForce_N
         self.yForce_N = yForce_N
         self.zForce_N = zForce_N
+
+        # Must run before _applyTorques: _applyForces rotates this step's
+        # net force using the CURRENT self.q, i.e. the rocket's attitude
+        # at the START of this step. If this ran after _applyTorques, it
+        # would rotate this step's force using an attitude that already
+        # includes this step's own rotation -- mixing old and new attitude
+        # within a single timestep.
+        self._applyForces(xForce_N, yForce_N, zForce_N)
+
+        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
 
         self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
 
@@ -445,31 +455,47 @@ class Rocket:
 
         return (yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
 
-    def _decomposeForce(self, force: Force) -> tuple[float, float, float]:
+    def _applyForces(self, xForce_N: float, yForce_N: float, zForce_N: float) -> None:
         """
-        Return the translational (location-independent) part of an applied
-        force.
+        Convert the net body-frame force this step into world-frame
+        acceleration.
 
-        For a rigid body, a force's contribution to linear acceleration of
-        the CG doesn't depend on where on the body it's applied -- only its
-        contribution to rotation does (see `_torqueFromForce`). This
-        function exists as the counterpart to `_torqueFromForce` so the two
-        can be called side-by-side in `sim()`; it currently just passes the
-        vector through unchanged, since where it's applied has already been
-        consumed by `_torqueFromForce`.
+        The net force accumulated in `sim()` (via `Force.decomposeForce`) is
+        in the body frame -- it rotates with the rocket. Position/velocity
+        are meant to be in the world frame, so the force is first rotated
+        into the world frame using the CURRENT `self.q` (see the note in
+        `sim()` on why this must run before `_applyTorques` updates `q`),
+        then converted to acceleration via Newton's second law (`a = F/m`).
+
+        Earth's gravity (`-GRAVITY_MPS2` along world z) is then added,
+        since it acts on the rocket regardless of any control-generated
+        force. This assumes the world frame's z-axis is vertical (up).
+
+        Note: this only computes and stores `xAcc_mps2/yAcc_mps2/
+        zAcc_mps2` -- it does NOT integrate them into velocity or
+        position. That integration is a deliberately separate, future
+        step.
 
         Args:
-            force (Force): One applied force, with its own `vector_N` and
-                `location_m` in the body frame.
+            xForce_N (float): Net body-frame x-force (yaw axis) in
+                Newtons, summed across all controls' forces this step.
+            yForce_N (float): Net body-frame y-force (pitch axis) in
+                Newtons, summed across all controls' forces this step.
+            zForce_N (float): Net body-frame z-force (roll/length axis) in
+                Newtons, summed across all controls' forces this step.
 
         Returns:
-            tuple[float, float, float]: (xForce_N, yForce_N, zForce_N) --
-                the same force vector, to be summed into a net body-frame
-                force. Not yet integrated into acceleration/velocity/
-                position; that's left for a future pass (e.g. once TVC
-                thrust needs it).
+            None
         """
-        return force.vector_N
+        w, x, y, z = self.q
+        rotation = Rotation.from_quat([x, y, z, w])  # scipy wants scalar-last order
+        xForce_world_N, yForce_world_N, zForce_world_N = rotation.apply([xForce_N, yForce_N, zForce_N])
+
+        self.xAcc_mps2 = xForce_world_N / self.mass_kg
+        self.yAcc_mps2 = yForce_world_N / self.mass_kg
+        self.zAcc_mps2 = zForce_world_N / self.mass_kg
+
+        self.zAcc_mps2 -= self.GRAVITY_MPS2
 
     def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float) -> None:
         """
