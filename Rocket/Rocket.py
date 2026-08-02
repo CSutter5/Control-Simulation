@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from Controls import Controls
+from Controls import Controls, Force
 
 class Rocket:
     """
@@ -41,6 +41,7 @@ class Rocket:
         r_m (float): Rocket body radius in meters.
         length_m (float): Rocket body length in meters.
         mass_kg (float): Rocket mass in kilograms.
+        CG_m (float): The Center of Gravity measured from the top of the rocket in meters
         targetFunc (Callable[[float], tuple]): Function mapping simulation
             time (seconds) to a 6-tuple of
             (targetXPos_m, targetYPos_m, targetZPos_m, targetYaw_deg,
@@ -54,6 +55,11 @@ class Rocket:
             each step.
         xPos_m/yPos_m/zPos_m, xVel_mps/yVel_mps/zVel_mps: Position and
             velocity in meters and meters/sec.
+        xForce_N/yForce_N/zForce_N (float): Net body-frame force left over
+            each step after each control's force has had its torque
+            contribution extracted (`_torqueFromForce`). Recomputed every
+            `sim()` call but not yet integrated into acceleration,
+            velocity, or position -- see `_decomposeForce`.
         yaw_rad/pitch_rad/roll_rad: Current absolute orientation in radians,
             derived from the internal orientation quaternion `self.q`.
         yawVel_rps/pitchVel_rps/rollVel_rps: Current body-frame angular
@@ -77,9 +83,11 @@ class Rocket:
     Ix_kgm2:    float
     Iy_kgm2:    float
     Iz_kgm2:    float
+    CG_m:       float
     r_m:        float
     length_m:   float
     mass_kg:    float
+
     targetFunc: Callable[[float], tuple[float, float, float, float, float, float]]
     simTimeStep: float
     controls: list[Controls]
@@ -97,6 +105,14 @@ class Rocket:
     zPos_m    = 0.0
     zVel_mps  = 0.0
     zAcc_mps2 = 0.0
+
+    # Net body-frame force left over after torque has been extracted from
+    # each control's force via `_torqueFromForce`/`_decomposeForce` each
+    # step. Not yet integrated into acceleration/velocity/position -- see
+    # `_decomposeForce` docstring.
+    xForce_N = 0.0
+    yForce_N = 0.0
+    zForce_N = 0.0
 
     yaw_rad    = 0.0
     yawVel_rps = 0.0
@@ -140,8 +156,8 @@ class Rocket:
     ])
 
     def __init__(self, simDataPath: str, 
-        Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: 
-        float, r_m: float, length_m: float, mass_kg:float, 
+        Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: float, CG_m: float,
+        r_m: float, length_m: float, mass_kg:float, 
         targetFunc: Callable[[float], tuple[float, float, float, float, float, float]], 
         simTimeStep: float, controls: list[Controls]
     ):
@@ -159,6 +175,7 @@ class Rocket:
                 Must not be 0.
             Iz_kgm2 (float): Moment of inertia about the roll axis, kg*m^2.
                 Must not be 0.
+            CG_m (float): The Center of Gravity measured from the top of the rocket in meters
             r_m (float): Rocket body radius in meters.
             length_m (float): Rocket body length in meters.
             mass_kg (float): Rocket mass in kilograms.
@@ -183,6 +200,7 @@ class Rocket:
         self.Ix_kgm2  = Ix_kgm2
         self.Iy_kgm2  = Iy_kgm2
         self.Iz_kgm2  = Iz_kgm2
+        self.CG_m     = CG_m
         self.r_m      = r_m
         self.length_m = length_m
         self.mass_kg    = mass_kg
@@ -263,7 +281,6 @@ class Rocket:
         self.simTime += self.simTimeStep
         self.running = self.simTime < self.simStop
 
-
         self._updateAllSimData()
 
         self.targetXPos_m, self.targetYPos_m, self.targetZPos_m, self.targetYaw_deg, self.targetPitch_deg, self.targetRoll_deg = self.targetFunc(self.simTime)
@@ -272,13 +289,31 @@ class Rocket:
         pitchTorque_Nm  = 0.0
         rollTorque_Nm   = 0.0
 
+        xForce_N = 0.0
+        yForce_N = 0.0
+        zForce_N = 0.0
+
         for control in self.controls:
-            torques = control.sim(rocket=self, **kwargs)
-            yawTorque_Nm    += torques[0]
-            pitchTorque_Nm  += torques[1]
-            rollTorque_Nm   += torques[2]
+            for force in control.sim(rocket=self, **kwargs):
+                yT, pT, rT = self._torqueFromForce(force)
+                yawTorque_Nm   += yT
+                pitchTorque_Nm += pT
+                rollTorque_Nm  += rT
+
+                fx, fy, fz = self._decomposeForce(force)
+                xForce_N += fx
+                yForce_N += fy
+                zForce_N += fz
 
         self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
+
+        # Net body-frame force left over after torque has been extracted.
+        # Stored for now so a future translational-integration step (e.g.
+        # TVC thrust contributing to linear acceleration/velocity/position)
+        # can consume it -- not integrated into position/velocity yet.
+        self.xForce_N = xForce_N
+        self.yForce_N = yForce_N
+        self.zForce_N = zForce_N
 
         self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
 
@@ -336,9 +371,14 @@ class Rocket:
         Returns:
             None
         """
-        self.zVel_mps = self._getSimData('zVel_mps', self.simTime)
 
-        self.airDensity = self._getSimData('airDensity', self.simTime)
+        if "zVel_mps" in self.simData:   self.zVel_mps   = self._getSimData('zVel_mps', self.simTime)
+        if "airDensity" in self.simData: self.airDensity = self._getSimData('airDensity', self.simTime)
+
+        if "CG_m" in self.simData:    self.CG_m    = self._getSimData('CG_m', self.simTime)
+        if "Ix_kgm2" in self.simData: self.Ix_kgm2 = self._getSimData('Ix_kgm2', self.simTime)
+        if "Iy_kgm2" in self.simData: self.Iy_kgm2 = self._getSimData('Iy_kgm2', self.simTime)
+        if "Iz_kgm2" in self.simData: self.Iz_kgm2 = self._getSimData('Iz_kgm2', self.simTime)
 
     def _getSimData(self, columnName: str, time: float) -> float:
         """
@@ -363,6 +403,73 @@ class Rocket:
 
         idx = (self.simData['time'] - time).abs().idxmin()
         return self.simData.loc[idx, columnName]
+
+    def _torqueFromForce(self, force: Force) -> tuple[float, float, float]:
+        """
+        Convert one applied Force into the torque it generates about the
+        rocket's center of gravity.
+
+        Uses `torque = r x F`, where `r` is `force.location_m` relative to
+        the CG. `location_m`'s z-component and `CG_m` are both measured
+        from the same reference point along the body, so
+        `force.location_m[2] - CG_m` gives the lever arm along the body's
+        z-axis; X/Y offsets need no such adjustment since the CG is assumed
+        to sit on the body centerline.
+
+        Because a control returns one `Force` per distinct application
+        point (see `Controls.Force`), a control made of several
+        force-generating surfaces (e.g. `Canards` with several fins placed
+        symmetrically around the body) can have its individual per-surface
+        torques summed here *before* any translational cancellation, which
+        correctly produces a net torque (e.g. pure roll) even when those
+        same forces cancel to zero net translational force -- a pure
+        couple that a single aggregate (force, location) pair could not
+        represent.
+
+        Args:
+            force (Force): One applied force, with its own `vector_N` and
+                `location_m` in the body frame.
+
+        Returns:
+            tuple[float, float, float]: (yawTorque_Nm, pitchTorque_Nm,
+                rollTorque_Nm) generated by this force about the CG.
+        """
+        fx, fy, fz = force.vector_N
+
+        rx, ry, rz = force.location_m
+        rz -= self.CG_m
+
+        yawTorque_Nm   = ry * fz - rz * fy
+        pitchTorque_Nm = rz * fx - rx * fz
+        rollTorque_Nm  = rx * fy - ry * fx
+
+        return (yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
+
+    def _decomposeForce(self, force: Force) -> tuple[float, float, float]:
+        """
+        Return the translational (location-independent) part of an applied
+        force.
+
+        For a rigid body, a force's contribution to linear acceleration of
+        the CG doesn't depend on where on the body it's applied -- only its
+        contribution to rotation does (see `_torqueFromForce`). This
+        function exists as the counterpart to `_torqueFromForce` so the two
+        can be called side-by-side in `sim()`; it currently just passes the
+        vector through unchanged, since where it's applied has already been
+        consumed by `_torqueFromForce`.
+
+        Args:
+            force (Force): One applied force, with its own `vector_N` and
+                `location_m` in the body frame.
+
+        Returns:
+            tuple[float, float, float]: (xForce_N, yForce_N, zForce_N) --
+                the same force vector, to be summed into a net body-frame
+                force. Not yet integrated into acceleration/velocity/
+                position; that's left for a future pass (e.g. once TVC
+                thrust needs it).
+        """
+        return force.vector_N
 
     def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float) -> None:
         """
@@ -515,7 +622,7 @@ class Rocket:
             ax1 (any, optional): First External Plot Axis. Defaults to None.
             ax2 (any, optional): Second External Plot Axis. Defaults to None.
         """
-        
+
         importedAxis = True
 
         if ax1 is None or ax2 is None:

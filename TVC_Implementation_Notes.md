@@ -1,9 +1,8 @@
 ## Planning for TVC a implementation
 
-- I need to have sim return torques and forces (adding to Controls class and all children)
-    - Quick implementation assumes 1 force location per object
-        - The control class holds a location in the body reference frame (need to deicide if its from the tip or tail of the rocket)
-        - Then the rocket class will take that force a cross it with a vector from the cg to the force location
+- ~~I need to have sim return torques and forces (adding to Controls class and all children)~~
+    - ~~The control class holds a location in the body reference frame (need to deicide if its from the tip or tail of the rocket)~~
+    - ~~Then the rocket class will take that force a cross it with a vector from the cg to the force location~~
 
 - Should store CG location in the rocket to more uniformly calculate torques
     - Maybe the controls should return force vectors at a given location that way only the rocket *really only has to deal with reference frames*

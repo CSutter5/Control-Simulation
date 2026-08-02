@@ -130,6 +130,8 @@ rocket = Rocket.Rocket(
     Ix_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the x-axis
     Iy_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the y-axis
     Iz_kgm2=0.01, # Mass Moment of Inerta (MMOI) around the z-axis
+    CG_m=0, # ReactionWheel's reaction torque is an internal couple, independent
+            # of CG placement (see Controls/ReactionWheel.py), so 0 is fine here
     r_m=0.05,
     length_m=0,   # not used by the current (roll-only) physics model
     mass_kg=0,    # not used by the current (roll-only) physics model

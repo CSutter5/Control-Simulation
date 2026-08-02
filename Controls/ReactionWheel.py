@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 import pandas as pd
 
 from .Controls import Controls
+from .Force import Force
 # NOTE: intentionally an absolute import, not `from .Rocket import Rocket`.
 # Controls/ and Rocket/ are sibling packages with no shared parent package,
 # so a relative import cannot cross that boundary — this requires Rocket/
@@ -26,12 +27,27 @@ class ReactionWheel(Controls):
     `speed_rps` setter). The torque reacted onto the rocket body is the
     equal-and-opposite reaction to the wheel's own angular acceleration:
     as the wheel spins up in one direction, the rocket body is pushed to
-    spin the other way, so the returned torque is
+    spin the other way, so the underlying torque is
     `-I_kgm2 * dOmega_wheel/dt`.
 
-    Only roll torque is currently produced — `sim()` always returns
-    (0.0, 0.0, rollTorque_Nm) — consistent with the project's current focus
-    on roll-only dynamics (see README).
+    This torque is a genuine internal couple -- it has no real lever arm,
+    unlike an external aerodynamic force offset from the CG (e.g.
+    `Canards`). Since `Controls.sim()` returns forces rather than torques,
+    `sim()` here represents that couple as two equal-and-opposite tangential
+    forces at an arbitrary internal radius (`_COUPLE_RADIUS_M`, via the
+    shared `Controls._tangentialForces` helper). This is deliberately
+    non-physical -- `_COUPLE_RADIUS_M` doesn't correspond to any real wheel
+    dimension, and any positive value reproduces the same net torque
+    exactly, since the radius cancels out of `r x F` (a smaller radius just
+    means a proportionally larger force magnitude, and vice versa). It's a
+    stand-in chosen to keep every `Controls` subclass returning `Force`s
+    rather than adding a separate torque-return path solely for this one
+    control.
+
+    Only roll torque is currently produced -- the two forces returned by
+    `sim()` combine (once processed by `Rocket`) to zero net translational
+    force and zero net yaw/pitch torque, leaving only roll -- consistent
+    with the project's current focus on roll-only dynamics (see README).
 
     Attributes:
         I_kgm2 (float): Mass moment of inertia of the reaction wheel about
@@ -52,6 +68,12 @@ class ReactionWheel(Controls):
     _lastSpeed_rps: float = 0.0
     _dt: float = 0.0
 
+    # Arbitrary, non-physical radius used only to express this control's
+    # internal reaction couple as two Forces (see class docstring). Any
+    # positive value gives an identical net torque once Rocket resolves
+    # r x F, since the radius cancels out exactly.
+    _COUPLE_RADIUS_M: float = 1.0
+
     df = pd.DataFrame(columns=["time_s", "wheelSpeed_rps", "generateTorque_Nm"])
 
 
@@ -69,7 +91,11 @@ class ReactionWheel(Controls):
                 degrees/sec. Stored internally as `_speed_rps` (and
                 `_lastSpeed_rps`) in radians/sec.
         """
-        super().__init__("ReactionWheel")
+        # forceLocation is (0, 0, 0) here since it isn't physically
+        # meaningful for this control -- see class docstring on
+        # _COUPLE_RADIUS_M for how the reaction torque is represented
+        # instead.
+        super().__init__("ReactionWheel", 0.0, 0.0, 0.0)
 
         self.I_kgm2 = I_kgm2
         self.maxAcceleration_rps2 = math.radians(maxAcceleration_dps2)
@@ -78,18 +104,19 @@ class ReactionWheel(Controls):
 
         self._dt = 0.0
 
-    def sim(self, rocket: Rocket, **kwargs) -> tuple[float, float, float]:
+    def sim(self, rocket: Rocket, **kwargs) -> list[Force]:
         """
         Simulate the reaction wheel for one step and return the resulting
-        torque.
+        forces.
 
         Updates the commanded wheel speed (subject to rate limiting, see
-        the `speed_rps` setter) from `kwargs['wheelSpeed_deg']`, then
-        computes the roll torque reacted onto the rocket body from the
-        wheel's own angular acceleration this step
-        (`-I_kgm2 * dOmega_wheel/dt`, per conservation of angular
-        momentum — see class docstring). Only roll torque is produced;
-        yaw and pitch are always returned as 0.0.
+        the `speed_rps` setter) from `kwargs['wheelSpeed_deg']`, computes
+        the roll torque reacted onto the rocket body from the wheel's own
+        angular acceleration this step (`-I_kgm2 * dOmega_wheel/dt`, per
+        conservation of angular momentum — see class docstring), then
+        represents that torque as two equal-and-opposite tangential forces
+        via `Controls._tangentialForces` (see class docstring on
+        `_COUPLE_RADIUS_M` for why).
 
         Args:
             rocket (Rocket): The rocket this control is attached to. Used
@@ -103,8 +130,10 @@ class ReactionWheel(Controls):
             TypeError: If `wheelSpeed_deg` is not present in `kwargs`.
 
         Returns:
-            tuple[float, float, float]: (0.0, 0.0, rollTorque_Nm) — the
-                roll torque reacted onto the rocket body this step, in Nm.
+            list[Force]: Two tangential forces which, once resolved by
+                `Rocket`, combine to zero net translational force and zero
+                net yaw/pitch torque, leaving only the roll torque computed
+                this step.
         """
 
         if not ("wheelSpeed_deg" in kwargs.keys()):
@@ -124,7 +153,18 @@ class ReactionWheel(Controls):
             "generateTorque_Nm": generatedTorque_Nm
         }
 
-        return (0.0, 0.0, generatedTorque_Nm)
+        # Two opposing tangential forces at radius _COUPLE_RADIUS_M each
+        # contribute torque = radius * magnitude (see _tangentialForces),
+        # so with two forces the magnitude below reproduces
+        # generatedTorque_Nm exactly regardless of the (arbitrary) radius.
+        magnitude_N = generatedTorque_Nm / (2 * self._COUPLE_RADIUS_M)
+
+        return self._tangentialForces(
+            magnitude_N=magnitude_N,
+            radius_m=self._COUPLE_RADIUS_M,
+            z_m=0.0,
+            numForces=2
+        )
 
     @property
     def speed_rps(self) -> float:

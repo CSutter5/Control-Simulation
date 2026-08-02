@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 
 from .Controls import Controls
+from .Force import Force
 # NOTE: intentionally an absolute import, not `from .Rocket import Rocket`.
 # Controls/ and Rocket/ are sibling packages with no shared parent package,
 # so a relative import cannot cross that boundary — this requires Rocket/
@@ -21,11 +22,24 @@ class Canards(Controls):
     aerodynamic lift on a set of canard fins deflected to a commanded angle.
 
     Lift is looked up from a CSV-based table of C_L values (indexed by angle
-    of attack and velocity) via linear interpolation, then converted to a
-    torque about the roll axis using the canard offset from the rocket's
-    centerline. The commanded angle is rate-limited and clamped to
-    `maxAngle_rad` on every write, modeling a physically realistic actuator
-    (finite slew rate and maximum deflection) rather than an ideal one.
+    of attack and velocity) via linear interpolation, giving a single lift
+    magnitude shared by every fin (all fins share the same deflection angle
+    and see the same flow). The commanded angle is rate-limited and clamped
+    to `maxAngle_rad` on every write, modeling a physically realistic
+    actuator (finite slew rate and maximum deflection) rather than an ideal
+    one.
+
+    `numCanards` fins are modeled as individually placed around the body,
+    evenly spaced starting from the angle implied by
+    (`forceLocationX_m`, `forceLocationY_m`), at a radius `hypot(forceLocationX_m,
+    forceLocationY_m)`. Each fin's force is applied tangent to that circle
+    (perpendicular to its own radius vector) rather than along a single
+    fixed axis -- this is what makes a symmetric arrangement (numCanards >= 2)
+    produce pure roll torque with the net yaw/pitch torque and net
+    translational force canceling out, instead of the pitch/yaw contribution
+    that a single aggregate application point would otherwise introduce
+    (see `Controls.Force` docstring for why this needs a list of forces
+    rather than one combined force).
 
     Attributes:
         airfoilDataPath (str): The path to a table of C_L for different velocities and AOA's
@@ -33,8 +47,7 @@ class Canards(Controls):
         tip_m (float): Tip coord of the canards in meters
         span_m (float): Span of the canards in meters
         sweep_m (float): Sweep of the canards in meters
-        numCanards (float): Number of canards
-        offset_m (float): Distance from the center axis to the canards in meters
+        numCanards (int): Number of canards
         maxAngle_rad (float): Max deflection angle of the canards in radians
         rateLimit_rps (float): Max angular speed of the canards in radians / sec
         updateFreq_hz (float): Update frequency of the canards in hz
@@ -54,8 +67,10 @@ class Canards(Controls):
     sweep_m:        float
     _surfaceArea_m2: float
 
-    numCanards: float
-    offset_m:   float
+    numCanards: int
+
+    _finDistance_m:        float
+    _finAxialPlacement_rad: float
 
     maxAngle_rad:   float
     rateLimit_rps:  float
@@ -64,10 +79,11 @@ class Canards(Controls):
     _angle_rad: float = 0.0
     _dt:        float = 0.0
 
-    df = pd.DataFrame(columns=["time_s", "angle_rad", "generateTorque_Nm"])
+    df = pd.DataFrame(columns=["time_s", "angle_rad", "generatedLift_n"])
 
     def __init__(self, airfoilDataPath: str, root_m: float, tip_m: float, span_m: float,
-        sweep_m: float, numCanards: float, offset_m: float, maxAngle_deg: float, rateLimit_dps: float,
+        forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float,
+        sweep_m: float, numCanards: int, maxAngle_deg: float, rateLimit_dps: float,
         updateFreq_hz: float
     ):
         """
@@ -75,17 +91,31 @@ class Canards(Controls):
 
         Args:
             airfoilDataPath (str): The path to a table of C_L for different velocities and AOA's
+            forceLocationX_m (float): The location that the force is acting on in the X axis in meters
+            forceLocationY_m (float): The location that the force is acting on in the Y axis in meters
+            forceLocationZ_m (float): The location that the force is acting on in the Z axis in meters
             root_m (float): Root coord of the canards in meters
             tip_m (float): Tip coord of the canards in meters
             span_m (float): Span of the canards in meters
             sweep_m (float): Sweep of the canards in meters
-            numCanards (float): Number of canards
-            offset_m (float): Distance from the center axis to the canards in meters
+            numCanards (int): Number of canards
             maxAngle_deg (float): Max deflection angle of the canards in degrees
             rateLimit_dps (float): Max angular speed of the canards in degrees / sec
             updateFreq_hz (float): Update frequency of the canards in hz
+
+        Note:
+            (forceLocationX_m, forceLocationY_m) is treated as the position
+            of fin #0 in the body's x-y plane; it determines both the
+            placement radius (`hypot(forceLocationX_m, forceLocationY_m)`)
+            and the starting angle that the remaining `numCanards - 1` fins
+            are evenly spaced from around that circle. `forceLocationZ_m`
+            is shared by every fin (all fins sit at the same point along
+            the body's length).
         """
-        super().__init__("Canards")
+        super().__init__("Canards", forceLocationX_m, forceLocationY_m, forceLocationZ_m)
+
+        self._finDistance_m = math.hypot(forceLocationX_m, forceLocationY_m)
+        self._finAxialPlacement_rad = math.atan2(forceLocationY_m, forceLocationX_m)
 
         self.airfoilDataPath = airfoilDataPath
         self._airfoilData     = pd.read_csv(self.airfoilDataPath)
@@ -101,7 +131,6 @@ class Canards(Controls):
         self._surfaceArea_m2 = (self.root_m + self.tip_m) / 2 * self.span_m
 
         self.numCanards    = numCanards
-        self.offset_m      = offset_m
         self.maxAngle_rad  = math.radians(maxAngle_deg)
         self.rateLimit_rps = math.radians(rateLimit_dps)
         self.updateFreq_hz = updateFreq_hz
@@ -144,16 +173,22 @@ class Canards(Controls):
 
         self._angle_rad = max(min(self._angle_rad, self.maxAngle_rad), -self.maxAngle_rad) # Clamp output
 
-    def sim(self, rocket: Rocket, **kwargs) -> tuple[float, float, float]:
+    def sim(self, rocket: Rocket, **kwargs) -> list[Force]:
         """
-        Simulate the canards for one step and return the resulting torque.
+        Simulate the canards for one step and return the resulting forces.
 
         Updates the commanded angle (subject to rate limiting, see
-        `angle_rad` setter) from `kwargs['canardAngle_deg']`, computes fin
-        lift for the rocket's current vertical velocity and air density via
-        `__calculateFinLift`, and converts that lift into a roll torque
-        using the canard offset and count. Only roll torque is produced;
-        yaw and pitch are always returned as 0.0.
+        `angle_rad` setter) from `kwargs['canardAngle_deg']`, computes a
+        single per-fin lift magnitude for the rocket's current vertical
+        velocity and air density via `__calculateFinLift` (every fin shares
+        the same deflection angle and flow, so the magnitude is the same
+        for all of them), then returns one `Force` per fin: each fin's
+        force points tangent to the circle it's placed on (perpendicular to
+        its own radius vector from the body centerline), at that fin's own
+        location. With `numCanards >= 2` placed symmetrically, these
+        per-fin forces cancel to zero net translational force and zero net
+        yaw/pitch torque, leaving only roll torque -- see the class
+        docstring.
 
         Args:
             rocket (Rocket): The rocket this control is attached to. Used
@@ -167,8 +202,8 @@ class Canards(Controls):
             TypeError: If `canardAngle_deg` is not present in `kwargs`.
 
         Returns:
-            tuple[float, float, float]: (0.0, 0.0, rollTorque_Nm) — the
-                roll torque generated by the canards this step, in Nm.
+            list[Force]: One `Force` per fin, each tangent to the fin's
+                placement circle at its own location.
         """
 
         if not ("canardAngle_deg" in kwargs.keys()):
@@ -177,17 +212,30 @@ class Canards(Controls):
         self.angle_rad = math.radians(kwargs['canardAngle_deg'])
         self._dt = rocket.simTimeStep
 
-        generatedTorque_Nm  = self.__calculateFinLift(rocket) * self.offset_m
-        generatedTorque_Nm *= -1 if self.angle_rad < 0 else 1
-        generatedTorque_Nm *= self.numCanards
+        finLift_n  = self.__calculateFinLift(rocket)
+        finLift_n *= -1 if self.angle_rad < 0 else 1
 
+        forces = self._tangentialForces(
+            magnitude_N=finLift_n,
+            radius_m=self._finDistance_m,
+            z_m=self.forceLocationZ_m,
+            numForces=self.numCanards,
+            startAngle_rad=self._finAxialPlacement_rad
+        )
+
+        # Logged for `plot()` as a signed magnitude (per-fin lift * fin
+        # count), not the net vector force -- with numCanards >= 2 placed
+        # symmetrically the net force vector is ~0 by design (see class
+        # docstring), so logging that instead would just show a flat line
+        # at 0. Kept signed (not abs()'d) so the plot still shows which
+        # direction the commanded roll is in.
         self.df.loc[rocket.simTime] = {
             "time_s": rocket.simTime,
             "angle_rad": self._angle_rad,
-            "generateTorque_Nm": generatedTorque_Nm
+            "generatedLift_n": finLift_n * self.numCanards
         }
 
-        return (0.0, 0.0, generatedTorque_Nm)
+        return forces
 
     def __calculateFinLift(self, rocket: Rocket) -> float:
         """
@@ -244,9 +292,9 @@ class Canards(Controls):
         ax1.legend(loc='lower left')
         ax1.grid(True)
 
-        ax2.plot(self.df.index, self.df['generateTorque_Nm'], color='red', label='Torque Generated by Canards')
+        ax2.plot(self.df.index, self.df['generatedLift_n'], color='red', label='Force Generated by Canards')
         ax2.set_xlabel('Time (s)')
-        ax2.set_ylabel('Torque (Newton Meter)')
+        ax2.set_ylabel('Force (Newtons)')
         ax2.legend(loc='lower left')
         ax2.grid(True)
         
