@@ -2,7 +2,7 @@
 
 A lightweight, extensible simulation for rocket control experiments. A single
 `Rocket` model owns the flight state and physics; pluggable `Controls`
-objects (canards, reaction wheels, etc.) generate torques against that
+objects (canards, reaction wheels, etc.) generate forces against that
 model, making it easy to swap between control mechanisms or combine several
 in one simulation.
 
@@ -11,9 +11,11 @@ in one simulation.
 The design centers on a unified `Rocket` class that owns the simulation
 state (position, velocity, orientation, angular rates) and advances it one
 timestep at a time. `Controls` objects implement a common interface —
-`sim(rocket, **kwargs) -> (yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)` —
-and the rocket polls every attached control each step, sums their torques,
-and integrates its state forward.
+`sim(rocket, **kwargs) -> list[Force]` — and the rocket polls every
+attached control each step, converts each returned `Force` into torque
+(via `r x F` about the center of gravity) and net translational force,
+sums both across all controls and all forces, and integrates its state
+forward.
 
 Two control mechanisms are currently implemented:
 - A canard-based roll controller (`Controls/Canards.py`), driven by
@@ -31,16 +33,21 @@ alongside or instead of these.
 - **Roll dynamics** are fully modeled: torque about the roll axis is
   integrated into angular velocity and orientation via quaternion
   kinematics.
-- **Yaw and pitch** are computed using the same (decoupled) equations as
-  roll, but without gyroscopic cross-coupling (`omega x I*omega`), so they
-  aren't yet physically complete for non-roll maneuvers. There is currently
-  no guard against non-zero yaw/pitch torque — it will run, just without
-  the missing coupling term.
-- **Position tracking** (X/Y/Z) assumes vertical flight with no lateral
-  forces — the only environment input driving the physics is vertical
-  velocity (`zVel_mps`) and air density from the sim data CSV. Lateral
-  position targets/errors exist in the API but aren't exercised by the
-  current physics model.
+- **Yaw and pitch** use the full Euler rigid-body rotation equation,
+  including gyroscopic cross-coupling (`omega x I*omega`) between all
+  three axes — this is not yet exercised by any current control (both
+  `Canards` and `ReactionWheel` only ever produce roll torque), but the
+  underlying physics is in place for a control that does (e.g. an
+  upcoming Thrust Vector Control implementation).
+- **Forces are converted to torque and net translational force every
+  step** via the `Force`-based control contract (see Overview above) —
+  including any lateral (X/Y) force a control produces. What's NOT yet
+  implemented is integrating that net force into velocity and position:
+  translational state is currently "on rails," driven only by
+  externally-supplied vertical velocity (`zVel_mps`) and air density from
+  the sim data CSV, rather than by the computed forces. Lateral position
+  targets/errors exist in the API but aren't exercised by the current
+  physics model as a result. See `TODO.md`.
 - **Reaction wheel PID gains** in the example (`ReactionWheelRocket.py`)
   are negative, unlike the canard example's positive gains — this is
   expected, since a reaction wheel's reaction torque opposes its own
@@ -56,14 +63,16 @@ See `TODO.md` for a running list of known issues and their status.
   position, velocity, orientation, and angular rates; advances them via
   `sim()`; loads environment/flight data from a CSV.
 - `Controls/Controls.py` — abstract base class all control implementations
-  subclass. Defines the `sim(rocket, **kwargs)` contract every control must
-  implement.
+  subclass. Defines the `sim(rocket, **kwargs) -> list[Force]` contract
+  every control must implement.
 - `Controls/Canards.py` — canard model: aerodynamic lift from an airfoil CSV
-  lookup, rate-limited and clamped actuator angle, roll-only torque output.
+  lookup, rate-limited and clamped actuator angle, returns roll-only net
+  torque as a symmetric set of per-fin forces.
 - `Controls/ReactionWheel.py` — reaction wheel model: an internal flywheel
   spun toward a commanded speed with motor-acceleration limiting; roll
   torque is the equal-and-opposite reaction to the wheel's own angular
-  acceleration (conservation of angular momentum), roll-only torque output.
+  acceleration (conservation of angular momentum), represented as a
+  two-force internal couple (see `Controls/Force.py`).
 - `example/CanardControl/` — reference example scenario:
   - `CanardRocket.py` — builds a `Rocket` + `Canards`, drives a scripted
     roll maneuver with a PID controller, and plots the result. Start here
@@ -118,10 +127,16 @@ wheel speed vs. rocket angular velocity for `ReactionWheelRocket.py`).
   the error against current state.
 - Each simulation step, `rocket.sim(**kwargs)` polls every attached control
   object via `control.sim(rocket=self, **kwargs)`. Each control returns a
-  torque tuple `(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)`.
-- The rocket sums torques across all attached controls, integrates angular
-  velocity and orientation (via quaternion kinematics), and updates
-  position/attitude error terms against the target state.
+  `list[Force]` — one `Force` (a vector plus its application point in the
+  body frame) per distinct force it produces this step.
+- The rocket converts each returned `Force` into torque about the center
+  of gravity (`r x F`) and its own translational contribution, sums both
+  across every force from every control, integrates angular velocity and
+  orientation (via the full Euler rigid-body equation and quaternion
+  kinematics), converts the net translational force to acceleration, and
+  updates position/attitude error terms against the target state. (Net
+  force -> acceleration is computed every step but not yet integrated into
+  velocity/position — see Current Status above.)
 - `**kwargs` passed into `rocket.sim(...)` are forwarded unchanged to every
   control's `sim()` — e.g. a `Canards` control requires a `canardAngle_deg`
   keyword, and a `ReactionWheel` control requires a `wheelSpeed_deg`
@@ -131,11 +146,12 @@ wheel speed vs. rocket angular velocity for `ReactionWheelRocket.py`).
 ## Extending the Project
 
 - **Add a new control mechanism** by subclassing `Controls` and overriding
-  `sim(self, rocket, **kwargs)` to return a torque tuple. See
+  `sim(self, rocket, **kwargs)` to return a `list[Force]`. See
   `Controls/Controls.py` for the full subclassing contract, and
   `Controls/Canards.py` or `Controls/ReactionWheel.py` as worked examples.
 - **Combine multiple controls** by passing several objects into the
-  rocket's `controls` list — their torques are summed automatically.
+  rocket's `controls` list — each control's forces are converted to torque
+  and summed automatically.
 - **Build a new example scenario** by copying the pattern in
   `CanardRocket.py` or `ReactionWheelRocket.py`: build your control(s),
   build a `Rocket` with a `targetFunc`, call `rocket.reset()`, then loop
@@ -144,7 +160,10 @@ wheel speed vs. rocket angular velocity for `ReactionWheelRocket.py`).
   `Canards` with a higher-fidelity physics model.
 - **Add sensors, latency, or actuator dynamics** for more realistic control
   loops.
-- **Implement pitch and yaw dynamics**, including gyroscopic coupling, to
-  move beyond the current roll-only physics.
+- **Add a control that produces non-zero yaw/pitch torque** (e.g. Thrust
+  Vector Control, currently the next planned milestone — see `TODO.md`) to
+  exercise the coupled yaw/pitch/roll dynamics, which are implemented but
+  currently untested against a real non-roll maneuver since no existing
+  control produces one.
 - **Add batch runs, parameter sweeps, or plotting utilities** for
   controller tuning.

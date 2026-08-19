@@ -5,15 +5,11 @@ import matplotlib.pyplot as plt
 import pandas as pd
 import numpy as np
 
-from .Controls import Controls
+from .Controls import Controls, MissingControlInputError
 from .Force import Force
 # NOTE: intentionally an absolute import, not `from .Rocket import Rocket`.
-# Controls/ and Rocket/ are sibling packages with no shared parent package,
-# so a relative import cannot cross that boundary — this requires Rocket/
-# to be installed/importable on sys.path (see pyproject.toml packages.find)
-# and Rocket/__init__.py to expose the Rocket class. Mixing this up caused
-# import errors previously; see project notes/TODO.md before "fixing" this
-# to `.Rocket` again.
+# See the "CANONICAL NOTE ON THIS PROJECT'S CIRCULAR-IMPORT HANDLING" in
+# Force.py's class docstring for why -- don't "fix" this to `.Rocket`.
 from Rocket import Rocket
 
 class Canards(Controls):
@@ -79,7 +75,12 @@ class Canards(Controls):
     _angle_rad: float = 0.0
     _dt:        float = 0.0
 
-    df = pd.DataFrame(columns=["time_s", "angle_rad", "generatedLift_n"])
+    # Type annotation only, no assignment -- df is a true instance
+    # attribute, created fresh in __init__ below. A class-level
+    # `df = pd.DataFrame(...)` assignment here would create ONE shared
+    # DataFrame object across every Canards instance (see the same fix
+    # applied to ReactionWheel, and TODO.md).
+    df: pd.DataFrame
 
     def __init__(self, airfoilDataPath: str, root_m: float, tip_m: float, span_m: float,
         forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float,
@@ -139,6 +140,7 @@ class Canards(Controls):
         self._angle_rad = 0.0
         self._dt = 0.0
 
+        self.df = pd.DataFrame(columns=["time_s", "angle_rad", "generatedLift_n"])
         self.df = self.df.set_index("time_s")
 
     @property
@@ -199,7 +201,8 @@ class Canards(Controls):
                 commanded canard deflection angle in degrees for this step.
 
         Raises:
-            TypeError: If `canardAngle_deg` is not present in `kwargs`.
+            MissingControlInputError: If `canardAngle_deg` is not present
+                in `kwargs`.
 
         Returns:
             list[Force]: One `Force` per fin, each tangent to the fin's
@@ -207,7 +210,7 @@ class Canards(Controls):
         """
 
         if not ("canardAngle_deg" in kwargs.keys()):
-            raise TypeError("missing 1 required positional argument: 'canardAngle_deg'")
+            raise MissingControlInputError(self.controlType, "canardAngle_deg")
 
         self.angle_rad = math.radians(kwargs['canardAngle_deg'])
         self._dt = rocket.simTimeStep

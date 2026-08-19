@@ -1,6 +1,7 @@
 from typing import Callable
 import random
 import math
+import warnings
 
 from scipy.spatial.transform import Rotation
 import matplotlib.pyplot as plt
@@ -16,10 +17,12 @@ class Rocket:
     A Rocket owns its full flight state (position, velocity, orientation,
     and angular rates) and advances that state one timestep at a time via
     `sim()`. Each call to `sim()` polls every attached `Controls` object for
-    a torque tuple, sums the torques across all controls, applies them to
-    update angular velocity and orientation, and refreshes environment-driven
-    values (airspeed components, air density) from `simData` for the new
-    simulation time.
+    a `list[Force]`, converts each returned `Force` into torque (`r x F`
+    about the center of gravity) and net translational force, sums both
+    across all controls and all forces, applies the resulting torque to
+    update angular velocity and orientation, converts the net force to
+    acceleration, and refreshes environment-driven values (airspeed
+    components, air density) from `simData` for the new simulation time.
 
     Axis convention (consistent throughout this class and its properties):
         body x = yaw, body y = pitch, body z = roll.
@@ -75,7 +78,15 @@ class Rocket:
             becomes False. Defaults to 15.
         simTime (float): Elapsed simulation time in seconds.
         running (bool): False once `simTime` reaches `simStop`.
-        df (pd.DataFrame): Pandas DataFrame containing sim data.
+        GRAVITY_MPS2 (float): Standard gravity, 9.80665 m/s^2, applied
+            along world-frame -z in `_applyForces` every step. See the
+            IMPORTANT INVARIANT note on `_applyForces` for the assumption
+            (rocket starts vertical) that makes this direction correct.
+        df (pd.DataFrame): Time-indexed log of this rocket's state at every
+            past `sim()` step (position, velocity, acceleration,
+            orientation, angular rates, target state, and error terms --
+            see the columns assigned in `sim()`), indexed by `time_s`.
+            Rebuilt empty by `reset()`. Consumed by `plotRoll()`.
     """
 
     simDataPath:    str
@@ -145,7 +156,13 @@ class Rocket:
     # Standard gravity, applied along world-frame -z in _applyForces.
     GRAVITY_MPS2 = 9.80665
 
-    df = pd.DataFrame(columns=[
+    # Column list only (read-only, safe to share at class scope -- never
+    # mutated). The DataFrame itself is NOT created here: `df` is a true
+    # instance attribute created fresh in __init__/reset() below. A
+    # class-level `df = pd.DataFrame(...)` assignment would create ONE
+    # shared DataFrame object across every Rocket instance (see the same
+    # fix applied to Canards/ReactionWheel, and TODO.md).
+    _DF_COLUMNS = [
         "time_s", 
         "xPos_m", "xVel_mps", "xAcc_mps2",
         "yPos_m", "yVel_mps", "yAcc_mps2",
@@ -157,7 +174,9 @@ class Rocket:
         "targetYaw_rad", "targetPitch_rad", "targetRoll_rad",
         "xPosError_m", "yPosError_m", "zPosError_m",
         "yawError_rad", "pitchError_rad", "rollError_rad"
-    ])
+    ]
+
+    df: pd.DataFrame
 
     def __init__(self, simDataPath: str, 
         Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: float, CG_m: float,
@@ -210,6 +229,26 @@ class Rocket:
         self.length_m = length_m
         self.mass_kg    = mass_kg
 
+        # _updateAllSimData overwrites CG_m/Ix_kgm2/Iy_kgm2/Iz_kgm2 from
+        # simData every step if the matching column exists, silently
+        # ignoring the constructor value passed above after the first
+        # sim() call. Warn here (once, at construction) rather than let
+        # that happen with no indication -- e.g. a CSV column left over
+        # from copy-pasting a different scenario's data file.
+        for _shadowedArg, _column in (
+            ("CG_m", "CG_m"), ("Ix_kgm2", "Ix_kgm2"),
+            ("Iy_kgm2", "Iy_kgm2"), ("Iz_kgm2", "Iz_kgm2")
+        ):
+            if _column in self.simData:
+                warnings.warn(
+                    f"simData ({self.simDataPath}) contains a '{_column}' "
+                    f"column, which will override the constructor argument "
+                    f"'{_shadowedArg}' every sim() step starting from the "
+                    f"first call -- the value passed to __init__ is only "
+                    f"used as the very first frame's fallback before that.",
+                    stacklevel=2
+                )
+
         self.targetFunc = targetFunc
         self.simTimeStep = simTimeStep
 
@@ -222,6 +261,7 @@ class Rocket:
 
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
 
+        self.df = pd.DataFrame(columns=self._DF_COLUMNS)
         self.df = self.df.set_index("time_s")
 
     def reset(self):
@@ -231,8 +271,25 @@ class Rocket:
         Zeroes `simTime`, reloads environment data for time 0 via
         `_updateAllSimData()`, resets the orientation quaternion to
         identity ([1, 0, 0, 0]), and zeroes all three angular velocities.
-        Does not reset position (`xPos_m`/`yPos_m`/`zPos_m`) or the
-        `controls` list.
+        Does not reset position (`xPos_m`/`yPos_m`/`zPos_m`), velocity
+        (`xVel_mps`/`yVel_mps`/`zVel_mps`), net force (`xForce_N`/
+        `yForce_N`/`zForce_N`), acceleration (`xAcc_mps2`/`yAcc_mps2`/
+        `zAcc_mps2`), or the `controls` list. This is a deliberate
+        decision, not an oversight: translational integration (velocity/
+        position from acceleration) isn't wired up yet (see project
+        TODO.md), so there's no single correct answer yet for what a
+        "reset" should mean for that state -- e.g. whether a second
+        `reset()`+run on the same instance should carry over leftover
+        velocity from a previous run, or start clean. Revisit this
+        decision as part of implementing that integration, rather than
+        guessing at it here in isolation beforehand.
+
+        NOTE: resetting `self.q` to identity encodes the assumption that
+        the rocket starts pointing straight up (body z aligned with world
+        z) -- see the IMPORTANT INVARIANT note in `_applyForces` for why
+        this specific choice is what makes applying gravity along world -z
+        correct. Do not repurpose the identity quaternion here without
+        also revisiting that note.
 
         Call this before starting a new simulation run with an
         already-constructed Rocket, instead of re-instantiating it.
@@ -262,23 +319,25 @@ class Rocket:
         Steps `simTime` forward, refreshes environment data, evaluates
         `targetFunc` for the new time, polls every control in `controls`
         (passing `rocket=self` and any `**kwargs` through to each control's
-        `sim()`), sums the returned per-control torque tuples, applies the
-        aggregate torque via `_applyTorques`, updates the derived Euler
-        angles, and recomputes position/attitude error terms against the
-        target state.
+        `sim()`) for a `list[Force]`. For every returned `Force`, converts
+        it to torque about the center of gravity (`_torqueFromForce`, via
+        `r x F`) and its own translational contribution
+        (`Force.decomposeForce`), summing both across every force from
+        every control. Applies the net translational force via
+        `_applyForces` (computing world-frame acceleration, not yet
+        integrated into velocity/position -- see `TODO.md`), THEN applies
+        the aggregate torque via `_applyTorques` (updating angular velocity
+        and orientation) -- this order is deliberate: `_applyForces` must
+        rotate this step's force using the rocket's attitude from the
+        START of the step, before `_applyTorques` updates that attitude,
+        or the two would mix old and new attitude within a single
+        timestep. Finally updates the derived Euler angles and recomputes
+        position/attitude error terms against the target state.
 
         Args:
             **kwargs: Forwarded unchanged to every control's `sim()` call.
                 For example, a `Canards` control requires a
                 `canardAngle_deg` keyword argument here.
-
-        Note:
-            The README describes yaw/pitch dynamics as not yet implemented
-            and states that a non-zero yaw or pitch torque should raise an
-            error. That guard is not currently present in `_applyTorques`
-            or here — yaw/pitch torques are applied the same as roll. If
-            you're relying on that documented behavior, treat it as a
-            pending TODO rather than existing protection.
 
         Returns:
             None
@@ -323,7 +382,19 @@ class Rocket:
         # within a single timestep.
         self._applyForces(xForce_N, yForce_N, zForce_N)
 
-        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm)
+        # Per-axis MMOI used for torque -> angular acceleration must
+        # include any internal spinning mass a control carries (e.g.
+        # ReactionWheel's flywheel), not just the passive body structure
+        # in Ix_kgm2/Iy_kgm2/Iz_kgm2 -- see Controls.additionalYaw/Pitch/
+        # RollInertia_kgm2 and ReactionWheel's class docstring for the
+        # conservation-of-angular-momentum reasoning. Computed fresh each
+        # step (not accumulated into self.Ix_kgm2 etc.) so those attributes
+        # keep meaning "structure only".
+        effectiveIx_kgm2 = self.Ix_kgm2 + sum(c.additionalYawInertia_kgm2 for c in self.controls)
+        effectiveIy_kgm2 = self.Iy_kgm2 + sum(c.additionalPitchInertia_kgm2 for c in self.controls)
+        effectiveIz_kgm2 = self.Iz_kgm2 + sum(c.additionalRollInertia_kgm2 for c in self.controls)
+
+        self._applyTorques(yawTorque_Nm, pitchTorque_Nm, rollTorque_Nm, effectiveIx_kgm2, effectiveIy_kgm2, effectiveIz_kgm2)
 
         self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
 
@@ -386,6 +457,7 @@ class Rocket:
         if "airDensity" in self.simData: self.airDensity = self._getSimData('airDensity', self.simTime)
 
         if "CG_m" in self.simData:    self.CG_m    = self._getSimData('CG_m', self.simTime)
+        if "mass_kg" in self.simData: self.mass_kg = self._getSimData('mass_kg', self.simTime)
         if "Ix_kgm2" in self.simData: self.Ix_kgm2 = self._getSimData('Ix_kgm2', self.simTime)
         if "Iy_kgm2" in self.simData: self.Iy_kgm2 = self._getSimData('Iy_kgm2', self.simTime)
         if "Iz_kgm2" in self.simData: self.Iz_kgm2 = self._getSimData('Iz_kgm2', self.simTime)
@@ -404,12 +476,26 @@ class Rocket:
                 'airDensity').
             time (float): Simulation time in seconds to look up.
 
+        Raises:
+            KeyError: If `columnName` is not present in `simData`. Every
+                current call site (`_updateAllSimData`) already guards this
+                with `if columnName in self.simData` first, since not every
+                column (e.g. `CG_m`, `Ix_kgm2`) is expected to be present
+                in every scenario's CSV -- this raises rather than
+                returning `None` so a *future* caller that skips that
+                check fails loudly instead of silently propagating `None`
+                into downstream arithmetic.
+
         Returns:
-            float: The value in `columnName` at the nearest row to `time`,
-                or None if `columnName` is not present in `simData`.
+            float: The value in `columnName` at the nearest row to `time`.
         """
         if not columnName in self.simData:
-            return None
+            raise KeyError(
+                f"'{columnName}' is not a column in simData (loaded from "
+                f"{self.simDataPath}) -- check for it with "
+                f"`if columnName in self.simData` before calling "
+                f"_getSimData if it's expected to be optional."
+            )
 
         idx = (self.simData['time'] - time).abs().idxmin()
         return self.simData.loc[idx, columnName]
@@ -471,6 +557,19 @@ class Rocket:
         since it acts on the rocket regardless of any control-generated
         force. This assumes the world frame's z-axis is vertical (up).
 
+        IMPORTANT INVARIANT: this is only physically correct if the
+        rocket's body z-axis (its long/roll axis) is aligned with world z
+        at simulation start -- i.e. the rocket starts pointing straight up
+        (a vertical rail launch). This holds today only as a consequence
+        of `reset()` setting `self.q` to the identity quaternion, which
+        means "body frame == world frame at t=0" by construction; nothing
+        else in this class checks or enforces it. If a non-vertical
+        starting attitude is ever needed, `self.q` must be initialized to
+        the rotation that aligns the rocket's actual starting orientation
+        with the world frame -- gravity's own direction below does not
+        change, but the identity-quaternion assumption that makes it
+        correct would need to be replaced.
+
         Note: this only computes and stores `xAcc_mps2/yAcc_mps2/
         zAcc_mps2` -- it does NOT integrate them into velocity or
         position. That integration is a deliberately separate, future
@@ -497,31 +596,49 @@ class Rocket:
 
         self.zAcc_mps2 -= self.GRAVITY_MPS2
 
-    def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float) -> None:
+    def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float,
+        Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: float
+    ) -> None:
         """
         Apply torques given in the rocket's body reference frame to update angular velocity
         and integrate the absolute orientation quaternion.
 
-        Angular acceleration is computed per-axis via a decoupled form of Euler's rotation
-        equation (no gyroscopic cross-coupling — see TODO). The resulting body-frame angular
-        velocity is then used to propagate the orientation quaternion self.q via the standard
-        quaternion kinematic equation q_dot = 0.5 * q (x) [0, omega], integrated with a
-        forward-Euler step and renormalized to counteract numerical drift.
+        Angular acceleration is computed per-axis via the full Euler rigid-body rotation
+        equation (I*omega_dot + omega x I*omega = torque), including the gyroscopic
+        cross-coupling term between axes -- unlike a decoupled `torque / I` approximation,
+        this correctly captures the tendency of a spinning body to precess when torqued about
+        an axis other than its spin axis. This resulting body-frame angular velocity is then
+        used to propagate the orientation quaternion self.q via the standard quaternion
+        kinematic equation q_dot = 0.5 * q (x) [0, omega], integrated with a forward-Euler
+        step and renormalized to counteract numerical drift.
 
         Axis convention: body x = yaw, body y = pitch, body z = roll.
 
-        TODO: Add gyroscopic coupling (omega x I*omega) to the angular acceleration calculation
-        once inertia asymmetry or high spin rates make the decoupled approximation inaccurate.
+        Note: the cross-coupling term above uses the same effective Ix_kgm2/Iy_kgm2/Iz_kgm2
+        passed in for the direct torque/I division -- i.e. it includes any control's
+        additional spin inertia (see Rocket.sim()). This treats a spinning internal mass
+        (e.g. ReactionWheel's flywheel) as rigidly co-rotating with the body for the purpose
+        of this equation. A wheel spinning fast relative to the body also has its own
+        gyroscopic precession effect on the *rocket* (angular momentum stored in the wheel
+        resists changes to the rocket's yaw/pitch), which is a distinct, more advanced
+        phenomenon not modeled here -- flagged as a known simplification, not silently
+        ignored.
 
         Args:
             yawTorque_Nm (float): Torque about the body x-axis (yaw) in Newton-meters.
             pitchTorque_Nm (float): Torque about the body y-axis (pitch) in Newton-meters.
             rollTorque_Nm (float): Torque about the body z-axis (roll) in Newton-meters.
+            Ix_kgm2 (float): Effective moment of inertia about the yaw axis this step
+                (structure Ix_kgm2 plus any control's additionalYawInertia_kgm2).
+            Iy_kgm2 (float): Effective moment of inertia about the pitch axis this step
+                (structure Iy_kgm2 plus any control's additionalPitchInertia_kgm2).
+            Iz_kgm2 (float): Effective moment of inertia about the roll axis this step
+                (structure Iz_kgm2 plus any control's additionalRollInertia_kgm2).
         """
-        # Decoupled Euler's equation: alpha = torque / I (per axis, no omega x I*omega term)
-        yawAcc_rps2   = yawTorque_Nm / self.Ix_kgm2
-        pitchAcc_rps2 = pitchTorque_Nm / self.Iy_kgm2
-        rollAcc_rps2  = rollTorque_Nm / self.Iz_kgm2
+        # Full Euler's equation per axis: alpha = (torque - omega x I*omega) / I
+        yawAcc_rps2   = (yawTorque_Nm   - (Iz_kgm2 - Iy_kgm2) * self.pitchVel_rps * self.rollVel_rps) / Ix_kgm2
+        pitchAcc_rps2 = (pitchTorque_Nm - (Ix_kgm2 - Iz_kgm2) * self.rollVel_rps  * self.yawVel_rps)   / Iy_kgm2
+        rollAcc_rps2  = (rollTorque_Nm  - (Iy_kgm2 - Ix_kgm2) * self.yawVel_rps   * self.pitchVel_rps) / Iz_kgm2
 
         # Integrate angular velocity (forward Euler)
         self.yawVel_rps   += yawAcc_rps2 * self.simTimeStep

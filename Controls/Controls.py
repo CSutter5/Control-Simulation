@@ -1,13 +1,36 @@
 import math
 
 from .Force import Force
+
+
+class MissingControlInputError(TypeError):
+    """
+    Raised when a `Controls` subclass's `sim()` is called without a
+    keyword argument it requires (e.g. `Canards` without `canardAngle_deg`,
+    `ReactionWheel` without `wheelSpeed_deg`).
+
+    A plain `TypeError` with a hand-written "missing 1 required positional
+    argument" message was previously used here, but that message mimics
+    CPython's own wording for a *positional*-argument error even though
+    these arguments are keyword-only (passed via `**kwargs`) -- which can
+    mislead someone debugging into thinking it's a real interpreter error
+    rather than an application-level check. Subclassing `TypeError` (rather
+    than introducing an unrelated exception type) keeps this catchable by
+    any code already expecting `TypeError` from a bad `sim()` call.
+    """
+
+    def __init__(self, controlType: str, missingKwarg: str):
+        """
+        Args:
+            controlType (str): The `controlType` of the `Controls` subclass
+                that raised this (e.g. "Canards", "ReactionWheel").
+            missingKwarg (str): The name of the required keyword argument
+                that was not present in `sim(**kwargs)`.
+        """
+        super().__init__(f"{controlType}.sim() is missing required keyword argument '{missingKwarg}'")
 # NOTE: intentionally an absolute import, not `from .Rocket import Rocket`.
-# Controls/ and Rocket/ are sibling packages with no shared parent package,
-# so a relative import cannot cross that boundary — this requires Rocket/
-# to be installed/importable on sys.path (see pyproject.toml packages.find)
-# and Rocket/__init__.py to expose the Rocket class. Mixing this up caused
-# import errors previously; see project notes/TODO.md before "fixing" this
-# to `.Rocket` again.
+# See the "CANONICAL NOTE ON THIS PROJECT'S CIRCULAR-IMPORT HANDLING" in
+# Force.py's class docstring for why -- don't "fix" this to `.Rocket`.
 from Rocket import Rocket
 
 
@@ -51,6 +74,22 @@ class Controls:
     forceLocationX_m: float
     forceLocationY_m: float
     forceLocationZ_m: float
+
+    # Additional moment of inertia (kg*m^2) this control's own internal
+    # rotating mass contributes to the rocket's total MMOI about each
+    # axis, beyond the passive body structure captured in
+    # `Rocket.Ix_kgm2/Iy_kgm2/Iz_kgm2`. Zero by default -- most controls
+    # (e.g. `Canards`) have no internal spinning mass of their own. A
+    # control that does (e.g. `ReactionWheel`'s flywheel) should override
+    # whichever axis attribute matches the axis it spins about in
+    # `__init__`. `Rocket.sim()` sums these across all attached controls
+    # each step and adds them to the corresponding structure MMOI before
+    # computing angular acceleration -- see `Rocket._applyTorques` and the
+    # class docstring on `ReactionWheel` for the conservation-of-angular-
+    # momentum reasoning behind this.
+    additionalYawInertia_kgm2:   float = 0.0
+    additionalPitchInertia_kgm2: float = 0.0
+    additionalRollInertia_kgm2:  float = 0.0
 
     def __init__(self, controlType: str, forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float):
         """

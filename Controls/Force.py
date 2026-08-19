@@ -27,8 +27,24 @@ class Force:
     Deliberately kept in its own module with no dependency on `Rocket` or
     `Controls` -- `Controls.py` imports `Rocket`, and `Rocket.py` needs
     `Force`, so if `Force` lived inside `Controls.py` it wouldn't be
-    defined yet when that circular chain is mid-import (see project
-    notes/TODO.md before moving this back).
+    defined yet when that circular chain is mid-import.
+
+    CANONICAL NOTE ON THIS PROJECT'S CIRCULAR-IMPORT HANDLING (referenced
+    from `Controls.py`, `Canards.py`, and `ReactionWheel.py` -- update
+    here, not there, if this ever changes):
+    `Controls/` and `Rocket/` are sibling packages with no shared parent
+    package, so `Controls.py`/`Canards.py`/`ReactionWheel.py` import
+    `Rocket` with `from Rocket import Rocket` (absolute), NOT
+    `from .Rocket import Rocket` (relative) -- a relative import cannot
+    cross a sibling-package boundary that has no common parent package to
+    resolve through. This requires `Rocket/` to be installed/importable on
+    `sys.path` (see `pyproject.toml`'s `packages.find`) and
+    `Rocket/__init__.py` to expose the `Rocket` class. Combined with
+    `Force` living in its own dependency-free module as described above,
+    this is what breaks the `Controls` <-> `Rocket` <-> `Force` import
+    cycle. Mixing the absolute/relative import up in any of the three
+    files above caused real import errors previously -- see this note
+    before "fixing" any of them back to a relative import.
 
     Attributes:
         vector_N (tuple[float, float, float]): Force vector (xForce_N,
