@@ -85,7 +85,7 @@ class Canards(Controls):
     def __init__(self, airfoilDataPath: str, root_m: float, tip_m: float, span_m: float,
         forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float,
         sweep_m: float, numCanards: int, maxAngle_deg: float, rateLimit_dps: float,
-        updateFreq_hz: float
+        updateFreq_hz: float, kwargPrefix: str = ""
     ):
         """
         Initialize the Canards object
@@ -103,6 +103,11 @@ class Canards(Controls):
             maxAngle_deg (float): Max deflection angle of the canards in degrees
             rateLimit_dps (float): Max angular speed of the canards in degrees / sec
             updateFreq_hz (float): Update frequency of the canards in hz
+            kwargPrefix (str, optional): See `Controls.kwargPrefix` -- set
+                this (e.g. `"canard1_"`) if attaching more than one
+                `Canards` instance to the same `Rocket`, so each can be
+                commanded independently via `rocket.sim(canard1_canardAngle_deg=...)`
+                instead of colliding on a shared `canardAngle_deg`.
 
         Note:
             (forceLocationX_m, forceLocationY_m) is treated as the position
@@ -113,7 +118,7 @@ class Canards(Controls):
             is shared by every fin (all fins sit at the same point along
             the body's length).
         """
-        super().__init__("Canards", forceLocationX_m, forceLocationY_m, forceLocationZ_m)
+        super().__init__("Canards", forceLocationX_m, forceLocationY_m, forceLocationZ_m, kwargPrefix=kwargPrefix)
 
         self._finDistance_m = math.hypot(forceLocationX_m, forceLocationY_m)
         self._finAxialPlacement_rad = math.atan2(forceLocationY_m, forceLocationX_m)
@@ -180,7 +185,9 @@ class Canards(Controls):
         Simulate the canards for one step and return the resulting forces.
 
         Updates the commanded angle (subject to rate limiting, see
-        `angle_rad` setter) from `kwargs['canardAngle_deg']`, computes a
+        `angle_rad` setter) from `kwargs['canardAngle_deg']` (or
+        `kwargs['<kwargPrefix>canardAngle_deg']` if `self.kwargPrefix` was
+        set at construction -- see `Controls.kwargPrefix`), computes a
         single per-fin lift magnitude for the rocket's current vertical
         velocity and air density via `__calculateFinLift` (every fin shares
         the same deflection angle and flow, so the magnitude is the same
@@ -197,22 +204,20 @@ class Canards(Controls):
                 for `rocket.simTimeStep` (to rate-limit the angle change)
                 and, via `__calculateFinLift`, `rocket.zVel_mps` and
                 `rocket.airDensity`.
-            **kwargs: Must include `canardAngle_deg` (float) — the
-                commanded canard deflection angle in degrees for this step.
+            **kwargs: Must include `canardAngle_deg` (float, subject to
+                `kwargPrefix`) — the commanded canard deflection angle in
+                degrees for this step.
 
         Raises:
-            MissingControlInputError: If `canardAngle_deg` is not present
-                in `kwargs`.
+            MissingControlInputError: If `canardAngle_deg` (or its
+                prefixed form) is not present in `kwargs`.
 
         Returns:
             list[Force]: One `Force` per fin, each tangent to the fin's
                 placement circle at its own location.
         """
 
-        if not ("canardAngle_deg" in kwargs.keys()):
-            raise MissingControlInputError(self.controlType, "canardAngle_deg")
-
-        self.angle_rad = math.radians(kwargs['canardAngle_deg'])
+        self.angle_rad = math.radians(self._requireKwarg(kwargs, "canardAngle_deg"))
         self._dt = rocket.simTimeStep
 
         finLift_n  = self.__calculateFinLift(rocket)

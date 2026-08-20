@@ -229,15 +229,16 @@ class Rocket:
         self.length_m = length_m
         self.mass_kg    = mass_kg
 
-        # _updateAllSimData overwrites CG_m/Ix_kgm2/Iy_kgm2/Iz_kgm2 from
-        # simData every step if the matching column exists, silently
+        # _updateAllSimData overwrites CG_m/Ix_kgm2/Iy_kgm2/Iz_kgm2/mass_kg
+        # from simData every step if the matching column exists, silently
         # ignoring the constructor value passed above after the first
         # sim() call. Warn here (once, at construction) rather than let
         # that happen with no indication -- e.g. a CSV column left over
         # from copy-pasting a different scenario's data file.
         for _shadowedArg, _column in (
             ("CG_m", "CG_m"), ("Ix_kgm2", "Ix_kgm2"),
-            ("Iy_kgm2", "Iy_kgm2"), ("Iz_kgm2", "Iz_kgm2")
+            ("Iy_kgm2", "Iy_kgm2"), ("Iz_kgm2", "Iz_kgm2"),
+            ("mass_kg", "mass_kg")
         ):
             if _column in self.simData:
                 warnings.warn(
@@ -316,28 +317,46 @@ class Rocket:
         """
         Advance the simulation by one `simTimeStep`.
 
-        Steps `simTime` forward, refreshes environment data, evaluates
-        `targetFunc` for the new time, polls every control in `controls`
-        (passing `rocket=self` and any `**kwargs` through to each control's
-        `sim()`) for a `list[Force]`. For every returned `Force`, converts
-        it to torque about the center of gravity (`_torqueFromForce`, via
-        `r x F`) and its own translational contribution
-        (`Force.decomposeForce`), summing both across every force from
-        every control. Applies the net translational force via
-        `_applyForces` (computing world-frame acceleration, not yet
-        integrated into velocity/position -- see `TODO.md`), THEN applies
-        the aggregate torque via `_applyTorques` (updating angular velocity
-        and orientation) -- this order is deliberate: `_applyForces` must
-        rotate this step's force using the rocket's attitude from the
-        START of the step, before `_applyTorques` updates that attitude,
-        or the two would mix old and new attitude within a single
-        timestep. Finally updates the derived Euler angles and recomputes
-        position/attitude error terms against the target state.
+        Fixed step order, every call: (1) refresh environment/CSV-driven
+        state, (2) poll every attached control, (3) apply the resulting
+        physics. Concretely:
+
+        Steps `simTime` forward, refreshes environment data via
+        `_updateAllSimData()` (`zVel_mps`, `airDensity`, and any
+        CSV-driven `CG_m`/`Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2`/`mass_kg` columns),
+        evaluates `targetFunc` for the new time, THEN polls every control
+        in `controls` (passing `rocket=self` and any `**kwargs` through to
+        each control's `sim()`) for a `list[Force]`. Because environment
+        data is refreshed before controls are polled, a control reading
+        `rocket.CG_m` (or the other CSV-driven attributes above) during its
+        own `sim()` sees THIS step's value, not last step's -- e.g. a TVC
+        control computing gimbal-relative-to-CG geometry can rely on this.
+        `rocket.q` (attitude), by contrast, is NOT yet updated at this
+        point -- it still reflects the end of the PREVIOUS step, since
+        `_applyTorques` (which updates it) doesn't run until after every
+        control has been polled -- see below.
+
+        For every `Force` returned by a control, converts it to torque
+        about the center of gravity (`_torqueFromForce`, via `r x F`) and
+        its own translational contribution (`Force.decomposeForce`),
+        summing both across every force from every control. Applies the
+        net translational force via `_applyForces` (computing world-frame
+        acceleration, not yet integrated into velocity/position -- see
+        `TODO.md`), THEN applies the aggregate torque via `_applyTorques`
+        (updating `rocket.q` and angular velocity) -- this order is
+        deliberate: `_applyForces` must rotate this step's force using the
+        rocket's attitude from the START of the step, before
+        `_applyTorques` updates that attitude, or the two would mix old
+        and new attitude within a single timestep. Finally updates the
+        derived Euler angles and recomputes position/attitude error terms
+        against the target state.
 
         Args:
             **kwargs: Forwarded unchanged to every control's `sim()` call.
                 For example, a `Canards` control requires a
-                `canardAngle_deg` keyword argument here.
+                `canardAngle_deg` keyword argument here (or a prefixed
+                variant -- see `Controls.kwargPrefix` -- if more than one
+                instance of the same control class is attached).
 
         Returns:
             None
@@ -449,6 +468,14 @@ class Rocket:
         treated as externally supplied flight/environment input rather 
         than derived state.
 
+        Also optionally refreshes `CG_m`/`Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2`/
+        `mass_kg` from matching `simData` columns, if present -- letting a
+        scenario model these as changing over the burn (e.g. propellant
+        depletion shifting CG and reducing mass together) rather than
+        fixed constants. See the CSV-shadowing warning in `__init__` for
+        the corresponding heads-up when a constructor argument is about to
+        be overridden this way.
+
         Returns:
             None
         """
@@ -456,11 +483,11 @@ class Rocket:
         if "zVel_mps" in self.simData:   self.zVel_mps   = self._getSimData('zVel_mps', self.simTime)
         if "airDensity" in self.simData: self.airDensity = self._getSimData('airDensity', self.simTime)
 
-        if "CG_m" in self.simData:    self.CG_m    = self._getSimData('CG_m', self.simTime)
-        if "mass_kg" in self.simData: self.mass_kg = self._getSimData('mass_kg', self.simTime)
-        if "Ix_kgm2" in self.simData: self.Ix_kgm2 = self._getSimData('Ix_kgm2', self.simTime)
-        if "Iy_kgm2" in self.simData: self.Iy_kgm2 = self._getSimData('Iy_kgm2', self.simTime)
-        if "Iz_kgm2" in self.simData: self.Iz_kgm2 = self._getSimData('Iz_kgm2', self.simTime)
+        if "CG_m" in self.simData:      self.CG_m     = self._getSimData('CG_m', self.simTime)
+        if "Ix_kgm2" in self.simData:   self.Ix_kgm2  = self._getSimData('Ix_kgm2', self.simTime)
+        if "Iy_kgm2" in self.simData:   self.Iy_kgm2  = self._getSimData('Iy_kgm2', self.simTime)
+        if "Iz_kgm2" in self.simData:   self.Iz_kgm2  = self._getSimData('Iz_kgm2', self.simTime)
+        if "mass_kg" in self.simData:   self.mass_kg  = self._getSimData('mass_kg', self.simTime)
 
     def _getSimData(self, columnName: str, time: float) -> float:
         """

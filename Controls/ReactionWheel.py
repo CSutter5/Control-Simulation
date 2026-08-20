@@ -94,7 +94,9 @@ class ReactionWheel(Controls):
     df: pd.DataFrame
 
 
-    def __init__(self, I_kgm2: float, maxAcceleration_dps2: float, startingSpeed_dps: float):
+    def __init__(self, I_kgm2: float, maxAcceleration_dps2: float, startingSpeed_dps: float,
+        kwargPrefix: str = ""
+    ):
         """
         Initialize the Reaction Wheel object.
 
@@ -107,12 +109,18 @@ class ReactionWheel(Controls):
             startingSpeed_dps (float): Initial wheel speed at t=0, relative
                 to the rocket body, in degrees/sec. Stored internally as
                 `_speed_rps` (and `_lastSpeed_rps`) in radians/sec.
+            kwargPrefix (str, optional): See `Controls.kwargPrefix` -- set
+                this (e.g. `"wheel1_"`) if attaching more than one
+                `ReactionWheel` instance to the same `Rocket`, so each can
+                be commanded independently via
+                `rocket.sim(wheel1_wheelSpeed_deg=...)` instead of
+                colliding on a shared `wheelSpeed_deg`.
         """
         # forceLocation is (0, 0, 0) here since it isn't physically
         # meaningful for this control -- see class docstring on
         # _COUPLE_RADIUS_M for how the reaction torque is represented
         # instead.
-        super().__init__("ReactionWheel", 0.0, 0.0, 0.0)
+        super().__init__("ReactionWheel", 0.0, 0.0, 0.0, kwargPrefix=kwargPrefix)
 
         self.I_kgm2 = I_kgm2
 
@@ -141,27 +149,30 @@ class ReactionWheel(Controls):
         forces.
 
         Updates the commanded wheel speed (subject to rate limiting, see
-        the `speed_rps` setter) from `kwargs['wheelSpeed_deg']` -- this
-        speed is relative to the rocket body (see class docstring) --
-        computes the roll torque reacted onto the rocket body from the
-        wheel's own angular acceleration this step (`-I_kgm2 *
-        dOmega_wheel/dt`, per conservation of angular momentum — see class
-        docstring), then represents that torque as two equal-and-opposite
-        tangential forces via `Controls._tangentialForces` (see class
-        docstring on `_COUPLE_RADIUS_M` for why).
+        the `speed_rps` setter) from `kwargs['wheelSpeed_deg']` (or
+        `kwargs['<kwargPrefix>wheelSpeed_deg']` if `self.kwargPrefix` was
+        set at construction -- see `Controls.kwargPrefix`) -- this speed is
+        relative to the rocket body (see class docstring) -- computes the
+        roll torque reacted onto the rocket body from the wheel's own
+        angular acceleration this step (`-I_kgm2 * dOmega_wheel/dt`, per
+        conservation of angular momentum — see class docstring), then
+        represents that torque as two equal-and-opposite tangential forces
+        via `Controls._tangentialForces` (see class docstring on
+        `_COUPLE_RADIUS_M` for why).
 
         Args:
             rocket (Rocket): The rocket this control is attached to. Used
                 for `rocket.simTimeStep`, stored as `_dt` and used both to
                 rate-limit the wheel's speed change (in the `speed_rps`
                 setter) and to compute the torque from that change here.
-            **kwargs: Must include `wheelSpeed_deg` (float) — the commanded
-                reaction wheel speed relative to the rocket body, in
-                degrees/second, for this step.
+            **kwargs: Must include `wheelSpeed_deg` (float, subject to
+                `kwargPrefix`) — the commanded reaction wheel speed
+                relative to the rocket body, in degrees/second, for this
+                step.
 
         Raises:
-            MissingControlInputError: If `wheelSpeed_deg` is not present in
-                `kwargs`.
+            MissingControlInputError: If `wheelSpeed_deg` (or its prefixed
+                form) is not present in `kwargs`.
 
         Returns:
             list[Force]: Two tangential forces which, once resolved by
@@ -170,13 +181,10 @@ class ReactionWheel(Controls):
                 this step.
         """
 
-        if not ("wheelSpeed_deg" in kwargs.keys()):
-            raise MissingControlInputError(self.controlType, "wheelSpeed_deg")
-
         # _dt must be set BEFORE calling the speed_rps setter below, since
         # the setter's rate limit (maxAcceleration_rps2 * _dt) uses it.
         self._dt = rocket.simTimeStep
-        self.speed_rps = math.radians(kwargs["wheelSpeed_deg"])
+        self.speed_rps = math.radians(self._requireKwarg(kwargs, "wheelSpeed_deg"))
 
         dWheelSpeed_rps = self._speed_rps - self._lastSpeed_rps
         generatedTorque_Nm = -self.I_kgm2 * (dWheelSpeed_rps / self._dt)

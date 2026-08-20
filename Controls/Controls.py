@@ -91,7 +91,23 @@ class Controls:
     additionalPitchInertia_kgm2: float = 0.0
     additionalRollInertia_kgm2:  float = 0.0
 
-    def __init__(self, controlType: str, forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float):
+    # Prepended to every kwarg name this control looks up via `_kwarg()`
+    # (e.g. "canard1_" turns a lookup of "canardAngle_deg" into
+    # "canard1_canardAngle_deg"). Empty by default -- most scenarios attach
+    # only one instance of a given control class, so the plain kwarg name
+    # (e.g. "canardAngle_deg") is unambiguous and no prefix is needed. Set
+    # this (via the `kwargPrefix` constructor argument) whenever multiple
+    # instances of the SAME control class are attached to one `Rocket` --
+    # e.g. a fore and an aft `Canards`, or multiple TVC-gimbaled motors --
+    # since `Rocket.sim(**kwargs)` forwards one shared kwargs dict to every
+    # attached control, and two instances reading the same unprefixed
+    # kwarg name would silently receive the same commanded value instead
+    # of being commanded independently.
+    kwargPrefix: str = ""
+
+    def __init__(self, controlType: str, forceLocationX_m: float, forceLocationY_m: float, forceLocationZ_m: float,
+        kwargPrefix: str = ""
+    ):
         """
         Initialize a control object.
 
@@ -100,12 +116,55 @@ class Controls:
             forceLocationX_m (float): The location that the force is acting on in the X axis in meters
             forceLocationY_m (float): The location that the force is acting on in the Y axis in meters
             forceLocationZ_m (float): The location that the force is acting on in the Z axis in meters
+            kwargPrefix (str, optional): Prefix this control looks for on
+                every kwarg it reads via `_kwarg()`/`_requireKwarg()`
+                (e.g. `kwargPrefix="canard1_"` makes this instance read
+                `canard1_canardAngle_deg` instead of `canardAngle_deg`).
+                Leave as the default `""` unless multiple instances of the
+                SAME control class are attached to one `Rocket` -- see the
+                `kwargPrefix` class attribute docstring above. Include
+                your own separator (e.g. the trailing `_`) in the prefix
+                you pass; it's concatenated directly onto the kwarg name.
         """
         self.controlType = controlType
 
         self.forceLocationX_m = forceLocationX_m
         self.forceLocationY_m = forceLocationY_m
         self.forceLocationZ_m = forceLocationZ_m
+
+        self.kwargPrefix = kwargPrefix
+
+    def _requireKwarg(self, kwargs: dict, name: str):
+        """
+        Look up a required keyword argument from a control's `sim(**kwargs)`
+        call, applying `self.kwargPrefix` if one was set at construction.
+
+        Subclasses should use this (rather than indexing `kwargs[name]` or
+        checking `name in kwargs` directly) for every kwarg they require,
+        so that setting `kwargPrefix` at construction transparently
+        disambiguates multiple instances of the same control class -- see
+        the `kwargPrefix` class attribute docstring for why this matters.
+
+        Args:
+            kwargs (dict): The `**kwargs` dict passed into this control's
+                `sim()`.
+            name (str): The UNPREFIXED kwarg name this control wants (e.g.
+                `"canardAngle_deg"`) -- `self.kwargPrefix` is prepended
+                automatically before the lookup.
+
+        Raises:
+            MissingControlInputError: If the (possibly prefixed) kwarg is
+                not present in `kwargs`.
+
+        Returns:
+            The value of the requested kwarg.
+        """
+        key = f"{self.kwargPrefix}{name}"
+
+        if key not in kwargs:
+            raise MissingControlInputError(self.controlType, key)
+
+        return kwargs[key]
 
     def sim(self, rocket: Rocket, **kwargs) -> list[Force]:
         """
