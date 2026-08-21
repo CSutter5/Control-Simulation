@@ -55,8 +55,6 @@ alongside or instead of these.
   wheel's inertia, direction convention, or timestep, re-tune these gains
   rather than assuming they still produce a stable response.
 
-See `TODO.md` for a running list of known issues and their status.
-
 ## Project Layout
 
 - `Rocket/Rocket.py` — the simulation engine and state container. Owns
