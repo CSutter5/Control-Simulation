@@ -32,14 +32,12 @@ class TVC(Controls):
     nearest-time lookup convention as `Rocket._getSimData` (no
     interpolation between rows).
 
-    Unlike `Canards` and `ReactionWheel`, which are constructed so their
-    returned forces cancel to a pure roll couple, `TVC` returns a single
-    `Force`: the full thrust vector, rotated off the body z-axis by the
-    current gimbal deflection, applied at the nozzle's fixed body-frame
-    location. This is therefore the first control in the project expected
-    to produce nonzero pitch/yaw torque -- exercising the gyroscopic
-    cross-coupling in `Rocket._applyTorques` for the first time in a real
-    (non-roll-only) maneuver.
+    `TVC` returns a single `Force`: the full thrust vector, rotated off
+    the body z-axis by the current gimbal deflection, applied at the
+    nozzle's fixed body-frame location. This is the first control in the
+    project expected to produce nonzero pitch/yaw torque -- exercising the
+    gyroscopic cross-coupling in `Rocket._applyTorques` for the first time
+    in a real (non-roll-only) maneuver.
 
     Mount placement (`forceLocationX_m`/`forceLocationY_m`): defaults to
     (0.0, 0.0) -- a single engine on the centerline, which by construction
@@ -57,9 +55,9 @@ class TVC(Controls):
     Rotation convention (motor frame -> body frame): intrinsic rotation,
     yaw (about body x) applied first, then pitch (about the new y). This
     rotation is relative to the body's own x/y axes regardless of this
-    engine's mount position -- unlike `Canards`' tangential-force setup,
-    an engine's gimbal direction does not depend on where around the body
-    it's mounted. At zero deflection this reduces to the nominal thrust
+    engine's mount position -- an engine's gimbal direction does not
+    depend on where around the body it's mounted. At zero deflection this
+    reduces to the nominal thrust
     vector (0, 0, thrust_N), i.e. thrust pushes the rocket in +z
     (nose-ward), consistent with the `forceLocationZ_m` convention used
     elsewhere in this project (more negative = further aft of the CG
@@ -131,9 +129,8 @@ class TVC(Controls):
             thrustCurvePath (str): Path to a time-indexed CSV of thrust
                 magnitude (a 'time' column and a 'thrust_N' column).
                 Sampled each step via linear interpolation against
-                'time' -- unlike `Rocket._getSimData`'s nearest-neighbor
-                convention, a thrust curve is expected to be a smooth
-                continuous function of time, so interpolating avoids
+                'time', since a thrust curve is expected to be a smooth
+                continuous function of time and interpolating avoids
                 introducing artificial steps. Rows are sorted by 'time'
                 once at construction; the CSV itself need not already be
                 sorted.
@@ -278,9 +275,8 @@ class TVC(Controls):
         docstring for the exact formula) and returns it as a single
         `Force` applied at this engine's fixed mount location.
 
-        Unlike `Canards`/`ReactionWheel`, this does not produce a
-        cancelling couple -- the returned force carries real net
-        translational and rotational content by design.
+        This does not produce a cancelling couple -- the returned force
+        carries real net translational and rotational content by design.
 
         Args:
             rocket (Rocket): The rocket this control is attached to. Used
@@ -330,12 +326,11 @@ class TVC(Controls):
         interpolation between the two nearest rows of the (time-sorted)
         thrust curve.
 
-        Deliberately different from `Rocket._getSimData`'s nearest-
-        neighbor convention: a thrust curve is a smooth physical
-        quantity (chamber pressure ramping up/down), so interpolating
-        between sample points avoids introducing artificial steps that a
-        nearest-neighbor lookup would produce on a coarsely-sampled
-        curve. `numpy.interp` is used directly against the presorted
+        A thrust curve is a smooth physical quantity (chamber pressure
+        ramping up/down), so interpolating between sample points avoids
+        introducing artificial steps that a nearest-neighbor lookup would
+        produce on a coarsely-sampled curve. `numpy.interp` is used directly
+        against the presorted
         `_thrustTime`/`_thrustMagnitude_N` arrays (see `__init__`) rather
         than pandas, since `np.interp` requires monotonically increasing
         x-values and doing that sort once at construction is cheaper

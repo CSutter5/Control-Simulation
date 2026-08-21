@@ -9,14 +9,10 @@ class MissingControlInputError(TypeError):
     keyword argument it requires (e.g. `Canards` without `canardAngle_deg`,
     `ReactionWheel` without `wheelSpeed_deg`).
 
-    A plain `TypeError` with a hand-written "missing 1 required positional
-    argument" message was previously used here, but that message mimics
-    CPython's own wording for a *positional*-argument error even though
-    these arguments are keyword-only (passed via `**kwargs`) -- which can
-    mislead someone debugging into thinking it's a real interpreter error
-    rather than an application-level check. Subclassing `TypeError` (rather
-    than introducing an unrelated exception type) keeps this catchable by
-    any code already expecting `TypeError` from a bad `sim()` call.
+    Subclassing `TypeError` (rather than introducing an unrelated exception
+    type) keeps this catchable by any code already expecting `TypeError`
+    from a bad `sim()` call, with a message that makes clear these are
+    keyword-only application-level checks rather than interpreter errors.
     """
 
     def __init__(self, controlType: str, missingKwarg: str):

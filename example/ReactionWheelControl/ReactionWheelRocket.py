@@ -153,7 +153,7 @@ if __name__ == "__main__":
     rocket.reset()
 
     # --- PID gains for the roll controller ---
-    # Negative here (unlike Canards' positive gains) because a reaction
+    # Negative here because a reaction
     # wheel's reaction torque opposes its own angular acceleration — see
     # the module docstring above and Controls/ReactionWheel.py. Tuned by
     # hand for this specific wheel/rocket inertia and timestep; re-tune if

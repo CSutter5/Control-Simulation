@@ -49,11 +49,11 @@ alongside or instead of these.
   targets/errors exist in the API but aren't exercised by the current
   physics model as a result. See `TODO.md`.
 - **Reaction wheel PID gains** in the example (`ReactionWheelRocket.py`)
-  are negative, unlike the canard example's positive gains — this is
-  expected, since a reaction wheel's reaction torque opposes its own
-  angular acceleration (see `Controls/ReactionWheel.py`). If you rework the
-  wheel's inertia, direction convention, or timestep, re-tune these gains
-  rather than assuming they still produce a stable response.
+  are negative — this is expected, since a reaction wheel's reaction
+  torque opposes its own angular acceleration (see
+  `Controls/ReactionWheel.py`). If you rework the wheel's inertia,
+  direction convention, or timestep, re-tune these gains rather than
+  assuming they still produce a stable response.
 
 ## Project Layout
 

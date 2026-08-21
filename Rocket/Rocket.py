@@ -632,9 +632,9 @@ class Rocket:
 
         Angular acceleration is computed per-axis via the full Euler rigid-body rotation
         equation (I*omega_dot + omega x I*omega = torque), including the gyroscopic
-        cross-coupling term between axes -- unlike a decoupled `torque / I` approximation,
-        this correctly captures the tendency of a spinning body to precess when torqued about
-        an axis other than its spin axis. This resulting body-frame angular velocity is then
+        cross-coupling term between axes, which captures the tendency of a spinning body
+        to precess when torqued about an axis other than its spin axis. This resulting
+        body-frame angular velocity is then
         used to propagate the orientation quaternion self.q via the standard quaternion
         kinematic equation q_dot = 0.5 * q (x) [0, omega], integrated with a forward-Euler
         step and renormalized to counteract numerical drift.
@@ -692,10 +692,9 @@ class Rocket:
         absolute Euler angles matching this rocket's axis convention:
         body x = yaw, body y = pitch, body z = roll.
 
-        Uses an intrinsic x-y-z rotation sequence. Note: like any 3-parameter Euler
-        angle extraction, this can hit gimbal lock at certain attitudes (here, when
-        the pitch angle approaches +/-90 deg) -- self.q itself has no such singularity,
-        only this derived representation does.
+        Uses an intrinsic x-y-z rotation sequence. This can hit gimbal lock at certain
+        attitudes (here, when the pitch angle approaches +/-90 deg) -- self.q itself
+        has no such singularity, only this derived representation does.
 
         Returns:
             tuple[float, float, float]: (yaw_rad, pitch_rad, roll_rad)

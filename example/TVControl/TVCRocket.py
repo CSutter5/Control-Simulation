@@ -5,10 +5,9 @@ TVC Pitch/Yaw Sine-Wave Demo
 Reference example for the TVC control mechanism: builds a single `Rocket`
 with one `TVC` control attached, drives the gimbal with two independent
 PID controllers tracking a +/-5 degree sine wave target on both pitch and
-yaw simultaneously, and plots the result. Unlike `CanardRocket.py` and
-`ReactionWheelRocket.py` (which only ever exercise roll), this is the
-first example that produces real pitch/yaw torque -- it's the first real
-test of the gyroscopic cross-coupling terms in `Rocket._applyTorques`.
+yaw simultaneously, and plots the result. This is the first example that
+produces real pitch/yaw torque -- it's the first real test of the
+gyroscopic cross-coupling terms in `Rocket._applyTorques`.
 
 Run from the `example/TVCControl/` directory (paths below are relative to
 it):
@@ -27,8 +26,8 @@ What this script does, in order:
        measured values).
     3. Constructs a `Rocket` wired up with that TVC control, the target
        function, a fixed timestep, and a minimal environment CSV (TVC has
-       no aerodynamic dependency, so unlike `CanardRocket.py` this CSV
-       carries no `zVel_mps`/`airDensity` data).
+       no aerodynamic dependency, so this CSV carries no
+       `zVel_mps`/`airDensity` data).
     4. Runs two independent PID loops (one for pitch, one for yaw) each
        step, feeding `gimbalPitch_deg`/`gimbalYaw_deg` into
        `rocket.sim(...)`.
@@ -72,13 +71,12 @@ def target(time_s: float) -> tuple[float, float, float, float, float, float]:
     `sim()` step and stores the result as the current target state (used
     to compute `rocket.pitchError_rad`/`rocket.yawError_rad`).
 
-    Unlike the roll-only ramp-hold-ramp target used in
-    `CanardRocket.py`/`ReactionWheelRocket.py`, this target continuously
-    varies pitch and yaw as a +/-AMPLITUDE_DEG sine wave at FREQUENCY_HZ
-    -- a basic tracking-authority test for TVC's two gimbal axes. Roll
-    and position targets are always 0, since TVC in this example is a
-    single centerline-mounted engine with no roll authority (see
-    `Controls/TVC.py` class docstring on multi-engine roll control).
+    This target continuously varies pitch and yaw as a +/-AMPLITUDE_DEG
+    sine wave at FREQUENCY_HZ -- a basic tracking-authority test for
+    TVC's two gimbal axes. Roll and position targets are always 0, since
+    TVC in this example is a single centerline-mounted engine with no
+    roll authority (see `Controls/TVC.py` class docstring on multi-engine
+    roll control).
 
     Args:
         time_s (float): Simulation time step.

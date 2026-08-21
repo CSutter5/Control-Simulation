@@ -28,12 +28,11 @@ class ReactionWheel(Controls):
     direction, the rocket body is pushed to spin the other way, so the
     underlying torque is `-I_kgm2 * dOmega_wheel/dt`.
 
-    This torque is a genuine internal couple -- it has no real lever arm,
-    unlike an external aerodynamic force offset from the CG (e.g.
-    `Canards`). Since `Controls.sim()` returns forces rather than torques,
-    `sim()` here represents that couple as two equal-and-opposite tangential
-    forces at an arbitrary internal radius (`_COUPLE_RADIUS_M`, via the
-    shared `Controls._tangentialForces` helper). This is deliberately
+    This torque is a genuine internal couple with no real lever arm. Since
+    `Controls.sim()` returns forces rather than torques, `sim()` here
+    represents that couple as two equal-and-opposite tangential forces at
+    an arbitrary internal radius (`_COUPLE_RADIUS_M`, via the shared
+    `Controls._tangentialForces` helper). This is deliberately
     non-physical -- `_COUPLE_RADIUS_M` doesn't correspond to any real wheel
     dimension, and any positive value reproduces the same net torque
     exactly, since the radius cancels out of `r x F` (a smaller radius just
@@ -138,9 +137,9 @@ class ReactionWheel(Controls):
 
         # Instance-level DataFrame -- see class-level `df` annotation above
         # for why this must be created fresh here rather than shared via a
-        # class attribute. Deliberately NOT set_index("time_s") here,
-        # unlike Canards/Rocket's df -- preserving this class's existing
-        # behavior unchanged; only the class-vs-instance scope is fixed.
+        # class attribute. Deliberately NOT set_index("time_s") here --
+        # preserving this class's existing behavior unchanged; only the
+        # class-vs-instance scope is fixed.
         self.df = pd.DataFrame(columns=["time_s", "wheelSpeed_rps", "generateTorque_Nm"])
 
     def sim(self, rocket: Rocket, **kwargs) -> list[Force]:
