@@ -130,8 +130,7 @@ if __name__ == "__main__":
     rocket.simStop = 4.0  # past F15 burnout (3.45s) -- see module docstring
 
     # --- PID gains: pitch axis ---
-    # UNTUNED starting guesses -- see module docstring's IMPORTANT note.
-    KpPitch = -0.3
+    KpPitch = -2
     KiPitch = 0.0
     KdPitch = -0.05
 
@@ -143,8 +142,7 @@ if __name__ == "__main__":
     lastErrorPitch = 0.0
 
     # --- PID gains: yaw axis ---
-    # Same sign/magnitude reasoning as pitch (symmetric gimbal geometry).
-    KpYaw = -0.3
+    KpYaw = -2
     KiYaw = 0.0
     KdYaw = -0.05
 
@@ -181,7 +179,7 @@ if __name__ == "__main__":
             gimbalYaw_deg=pidYaw
         )
 
-    fig, axis = plt.subplots(3, 2, figsize=(12, 10), sharey=False)
+    fig, axis = plt.subplots(3, 2, figsize=(12, 13), sharey=False)
 
     # Pitch/yaw tracking, reusing the same df columns Rocket already logs
     # (pitchError_rad/yawError_rad aren't currently exposed via a
@@ -209,8 +207,34 @@ if __name__ == "__main__":
     axis[0][1].grid(True)
 
     tvc.plot(axis[1][0], axis[2][0])
-    axis[1][1].axis('off')
-    axis[2][1].axis('off')
+    # axis[1][1].axis('off')
+    # axis[2][1].axis('off')
+
+    # Translational position/velocity -- see Rocket.py's translation
+    # integration: this single-engine centerline TVC has no rails
+    # position/velocity columns in FlightProfile.csv, so all three axes
+    # are fully integrated from computed acceleration (semi-implicit
+    # Euler). x/y should stay small (only the gimbal's own Fx/Fy
+    # component drives them -- no lateral aero here); z should climb
+    # roughly with thrust while the motor is burning, then arc over under
+    # gravity once thrust cuts off at burnout.
+    axis[1][1].plot(rocket.df.index, rocket.df['xPos_m'], color='black', label='X Position')
+    axis[1][1].plot(rocket.df.index, rocket.df['yPos_m'], color='blue',  label='Y Position')
+    axis[1][1].plot(rocket.df.index, rocket.df['zPos_m'], color='red',   label='Z Position')
+    axis[1][1].set_xlabel('Time (s)')
+    axis[1][1].set_ylabel('Position (m)')
+    axis[1][1].set_title('Position vs Time')
+    axis[1][1].legend(loc='lower left')
+    axis[1][1].grid(True)
+
+    axis[2][1].plot(rocket.df.index, rocket.df['xVel_mps'], color='black', label='X Velocity')
+    axis[2][1].plot(rocket.df.index, rocket.df['yVel_mps'], color='blue',  label='Y Velocity')
+    axis[2][1].plot(rocket.df.index, rocket.df['zVel_mps'], color='red',   label='Z Velocity')
+    axis[2][1].set_xlabel('Time (s)')
+    axis[2][1].set_ylabel('Velocity (m/s)')
+    axis[2][1].set_title('Velocity vs Time')
+    axis[2][1].legend(loc='lower left')
+    axis[2][1].grid(True)
 
     plt.tight_layout()
     plt.show()

@@ -57,13 +57,28 @@ class Rocket:
         airDensity (float): Current air density, refreshed from `simData`
             each step.
         xPos_m/yPos_m/zPos_m, xVel_mps/yVel_mps/zVel_mps: Position and
-            velocity in meters and meters/sec.
+            velocity in meters and meters/sec. Each axis is independently
+            either "rails" (read directly from `simData`, see
+            `_resolveTranslationModes`) or "integrated" (advanced each
+            step from `xAcc_mps2`/`yAcc_mps2`/`zAcc_mps2` via
+            semi-implicit Euler in `_integrateTranslation`), depending on
+            whether `simData` has a `{axis}Pos_m` and/or `{axis}Vel_mps`
+            column for that axis. Both a position AND a velocity column
+            may be present for the same axis -- both are then read
+            directly with no cross-derivation between them, on the
+            assumption that a real flight profile's independently
+            supplied position and velocity tracks are each accurate on
+            their own. `initialPos_m`/`initialVel_mps` (constructor
+            arguments) seed the starting value for axes that are NOT
+            rails-driven; rails axes get their initial value from
+            `simData` itself, at `simTime=0`.
         xForce_N/yForce_N/zForce_N (float): Net body-frame force left over
             each step after each control's force has had its torque
             contribution extracted (`_torqueFromForce`/
             `Force.decomposeForce`). Recomputed every `sim()` call and
-            converted to world-frame acceleration by `_applyForces`, but
-            not yet integrated into velocity or position.
+            converted to world-frame acceleration by `_applyForces`, then
+            consumed by `_integrateTranslation` for whichever axes are not
+            rails-driven (see `xPos_m`/etc. below).
         yaw_rad/pitch_rad/roll_rad: Current absolute orientation in radians,
             derived from the internal orientation quaternion `self.q`.
         yawVel_rps/pitchVel_rps/rollVel_rps: Current body-frame angular
@@ -121,7 +136,7 @@ class Rocket:
     # Net body-frame force left over after torque has been extracted from
     # each control's force via `_torqueFromForce`/`Force.decomposeForce`
     # each step. Converted to world-frame acceleration by `_applyForces`,
-    # but not yet integrated into velocity/position.
+    # then consumed by `_integrateTranslation` for non-rails axes.
     xForce_N = 0.0
     yForce_N = 0.0
     zForce_N = 0.0
@@ -176,13 +191,47 @@ class Rocket:
         "yawError_rad", "pitchError_rad", "rollError_rad"
     ]
 
+    # Per-axis ('x', 'y', 'z' keys) bools: whether simData has a
+    # '{axis}Pos_m'/'{axis}Vel_mps' column, resolved once by
+    # `_resolveTranslationModes` (called from __init__). See that
+    # method's docstring for the four (hasPos, hasVel) combinations this
+    # drives in `_updateAllSimData`/`_integrateTranslation`.
+    _hasPosCol: dict
+    _hasVelCol: dict
+
+    # Per-axis presorted (time, value) numpy array pairs for whichever
+    # position/velocity columns are present, used by
+    # `_interpTranslationData` (np.interp -- see that method and
+    # `_resolveTranslationModes`). Only populated for axes where the
+    # corresponding `_hasPosCol`/`_hasVelCol` entry is True.
+    _posInterpData: dict
+    _velInterpData: dict
+
+    # Whether simData has a 'CG_m' column, and its cached (time, value)
+    # interpolation pair if so -- see _resolveTranslationModes for why
+    # CG_m specifically is interpolated rather than read via the
+    # nearest-neighbor _getSimData used for the other CSV-shadowed
+    # constants.
+    _hasCGCol: bool
+    _cgInterpData: tuple
+
+    # Initial (x, y, z) position/velocity for axes that are NOT
+    # rails-driven, set from the `initialPos_m`/`initialVel_mps`
+    # constructor arguments and consumed by `reset()`. Ignored for any
+    # axis where `_hasPosCol`/`_hasVelCol` is True, since rails axes get
+    # their initial value from `simData` itself at simTime=0 instead.
+    _initialPos_m: tuple
+    _initialVel_mps: tuple
+
     df: pd.DataFrame
 
     def __init__(self, simDataPath: str, 
         Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: float, CG_m: float,
         r_m: float, length_m: float, mass_kg:float, 
         targetFunc: Callable[[float], tuple[float, float, float, float, float, float]], 
-        simTimeStep: float, controls: list[Controls]
+        simTimeStep: float, controls: list[Controls],
+        initialPos_m: tuple[float, float, float] = (0.0, 0.0, 0.0),
+        initialVel_mps: tuple[float, float, float] = (0.0, 0.0, 0.0)
     ):
         """
         Initialize the Rocket and load its environment/flight data.
@@ -190,8 +239,13 @@ class Rocket:
         Args:
             simDataPath (str): Path to a CSV containing time-indexed
                 environment/flight data (must include a 'time' column;
-                columns such as 'xVel_mps', 'yVel_mps', 'zVel_mps', and
-                'airDensity' are read via `_getSimData`).
+                columns such as 'airDensity'/'mass_kg'/'Ix_kgm2'/
+                'Iy_kgm2'/'Iz_kgm2' are read via `_getSimData`
+                (nearest-neighbor); 'CG_m' and
+                'xPos_m'/'yPos_m'/'zPos_m'/'xVel_mps'/'yVel_mps'/
+                'zVel_mps' are read via `_interpTranslationData` (linear
+                interpolation) if present -- see
+                `_resolveTranslationModes`).
             Ix_kgm2 (float): Moment of inertia about the yaw axis, kg*m^2.
                 Must not be 0.
             Iy_kgm2 (float): Moment of inertia about the pitch axis, kg*m^2.
@@ -209,6 +263,15 @@ class Rocket:
             simTimeStep (float): Fixed timestep in seconds used to advance
                 the simulation.
             controls (list[Controls]): Control objects to poll each step.
+            initialPos_m (tuple[float, float, float], optional): Starting
+                (x, y, z) position in meters, in world frame, used by
+                `reset()` for whichever axes are NOT rails-driven (see
+                `_resolveTranslationModes`). Ignored for rails axes --
+                those get their initial value from `simData` at
+                simTime=0 instead. Defaults to (0.0, 0.0, 0.0).
+            initialVel_mps (tuple[float, float, float], optional): Same as
+                `initialPos_m`, but for starting velocity. Defaults to
+                (0.0, 0.0, 0.0).
 
         Raises:
             ValueError: If any of Ix_kgm2, Iy_kgm2, Iz_kgm2, or mass_kg is 0.
@@ -228,6 +291,9 @@ class Rocket:
         self.r_m      = r_m
         self.length_m = length_m
         self.mass_kg    = mass_kg
+
+        self._initialPos_m  = initialPos_m
+        self._initialVel_mps = initialVel_mps
 
         # _updateAllSimData overwrites CG_m/Ix_kgm2/Iy_kgm2/Iz_kgm2/mass_kg
         # from simData every step if the matching column exists, silently
@@ -260,6 +326,12 @@ class Rocket:
         self.simTime = 0.0
         self.running = True
 
+        # Resolves _hasPosCol/_hasVelCol per axis and presorts/caches any
+        # interpolation arrays for translation rails columns that are
+        # present -- see method docstring. Done once here (not re-checked
+        # every step), same reasoning as TVC's thrust-curve presort.
+        self._resolveTranslationModes()
+
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
 
         self.df = pd.DataFrame(columns=self._DF_COLUMNS)
@@ -270,20 +342,21 @@ class Rocket:
         Reset the rocket to its initial simulation state.
 
         Zeroes `simTime`, reloads environment data for time 0 via
-        `_updateAllSimData()`, resets the orientation quaternion to
+        `_updateAllSimData()` (which also sets `xPos_m`/`yPos_m`/`zPos_m`
+        and `xVel_mps`/`yVel_mps`/`zVel_mps` directly for any rails axis,
+        interpolated at simTime=0), resets the orientation quaternion to
         identity ([1, 0, 0, 0]), and zeroes all three angular velocities.
-        Does not reset position (`xPos_m`/`yPos_m`/`zPos_m`), velocity
-        (`xVel_mps`/`yVel_mps`/`zVel_mps`), net force (`xForce_N`/
-        `yForce_N`/`zForce_N`), acceleration (`xAcc_mps2`/`yAcc_mps2`/
-        `zAcc_mps2`), or the `controls` list. This is a deliberate
-        decision, not an oversight: translational integration (velocity/
-        position from acceleration) isn't wired up yet (see project
-        TODO.md), so there's no single correct answer yet for what a
-        "reset" should mean for that state -- e.g. whether a second
-        `reset()`+run on the same instance should carry over leftover
-        velocity from a previous run, or start clean. Revisit this
-        decision as part of implementing that integration, rather than
-        guessing at it here in isolation beforehand.
+
+        For axes that are NOT rails-driven (see `_resolveTranslationModes`
+        / `_hasPosCol`/`_hasVelCol`), position and velocity are seeded from
+        the `initialPos_m`/`initialVel_mps` constructor arguments instead
+        -- this is what makes a second `reset()`+run on the same instance
+        reproducible rather than carrying over leftover state from a
+        previous run. Net force (`xForce_N`/`yForce_N`/`zForce_N`) and
+        acceleration (`xAcc_mps2`/`yAcc_mps2`/`zAcc_mps2`) are NOT reset
+        here since both are fully recomputed from scratch at the start of
+        every `sim()` step before they're read anywhere, so a stale value
+        here would never actually be observed.
 
         NOTE: resetting `self.q` to identity encodes the assumption that
         the rocket starts pointing straight up (body z aligned with world
@@ -301,6 +374,26 @@ class Rocket:
         self.simTime = 0.0
 
         self._updateAllSimData()
+
+        # _updateAllSimData (above) already set position/velocity directly
+        # for any rails axis (interpolated at simTime=0). Only seed the
+        # remaining non-rails state here, from the constructor's
+        # initialPos_m/initialVel_mps -- overwriting a rails axis here
+        # would stomp the simData-derived t=0 value that was just set.
+        # NOTE: velocity is seeded from initVel only when the axis has
+        # NEITHER column -- a position-only rails axis (`hasPos` True,
+        # `hasVel` False) still derives its velocity from the position
+        # interpolator in `_updateAllSimData` and must NOT be overwritten
+        # here, even though it has no velocity column of its own.
+        for axis, posAttr, velAttr, initPos, initVel in (
+            ('x', 'xPos_m', 'xVel_mps', self._initialPos_m[0], self._initialVel_mps[0]),
+            ('y', 'yPos_m', 'yVel_mps', self._initialPos_m[1], self._initialVel_mps[1]),
+            ('z', 'zPos_m', 'zVel_mps', self._initialPos_m[2], self._initialVel_mps[2]),
+        ):
+            if not self._hasPosCol[axis]:
+                setattr(self, posAttr, initPos)
+            if not self._hasVelCol[axis] and not self._hasPosCol[axis]:
+                setattr(self, velAttr, initVel)
 
         self.q = np.array([1.0, 0.0, 0.0, 0.0])
 
@@ -341,15 +434,20 @@ class Rocket:
         its own translational contribution (`Force.decomposeForce`),
         summing both across every force from every control. Applies the
         net translational force via `_applyForces` (computing world-frame
-        acceleration, not yet integrated into velocity/position -- see
-        `TODO.md`), THEN applies the aggregate torque via `_applyTorques`
-        (updating `rocket.q` and angular velocity) -- this order is
-        deliberate: `_applyForces` must rotate this step's force using the
-        rocket's attitude from the START of the step, before
-        `_applyTorques` updates that attitude, or the two would mix old
-        and new attitude within a single timestep. Finally updates the
-        derived Euler angles and recomputes position/attitude error terms
-        against the target state.
+        acceleration), THEN advances position/velocity for this step via
+        `_integrateTranslation` (per-axis rails-vs-integrated -- see that
+        method's docstring), THEN applies the aggregate torque via
+        `_applyTorques` (updating `rocket.q` and angular velocity) -- the
+        `_applyForces` / `_applyTorques` order is deliberate:
+        `_applyForces` must rotate this step's force using the rocket's
+        attitude from the START of the step, before `_applyTorques`
+        updates that attitude, or the two would mix old and new attitude
+        within a single timestep. `_integrateTranslation` only needs this
+        step's already-computed acceleration, so its position relative to
+        `_applyTorques` doesn't matter -- it's placed right after
+        `_applyForces` for locality. Finally updates the derived Euler
+        angles and recomputes position/attitude error terms against the
+        target state.
 
         Args:
             **kwargs: Forwarded unchanged to every control's `sim()` call.
@@ -401,6 +499,15 @@ class Rocket:
         # within a single timestep.
         self._applyForces(xForce_N, yForce_N, zForce_N)
 
+        # Advances xPos_m/yPos_m/zPos_m (and, for non-rails axes,
+        # xVel_mps/yVel_mps/zVel_mps) by one step -- see method docstring
+        # for the per-axis rails-vs-integrated behavior and the
+        # rails-vs-physics-force conflict warning it performs. Needs
+        # nothing from _applyTorques, so its position relative to that
+        # call doesn't matter; placed here for locality with _applyForces,
+        # whose xAcc_mps2/yAcc_mps2/zAcc_mps2 output it consumes.
+        self._integrateTranslation()
+
         # Per-axis MMOI used for torque -> angular acceleration must
         # include any internal spinning mass a control carries (e.g.
         # ReactionWheel's flywheel), not just the passive body structure
@@ -417,9 +524,9 @@ class Rocket:
 
         self.yaw_rad, self.pitch_rad, self.roll_rad = self._eulerFromQuat()
 
-        self.posXError_m = self.targetXPos_m - self.xPos_m
-        self.posYError_m = self.targetYPos_m - self.yPos_m
-        self.posZError_m = self.targetZPos_m - self.zPos_m
+        self.xPosError_m = self.targetXPos_m - self.xPos_m
+        self.yPosError_m = self.targetYPos_m - self.yPos_m
+        self.zPosError_m = self.targetZPos_m - self.zPos_m
 
         self.yawError_rad   = self.targetYaw_rad - self.yaw_rad
         self.pitchError_rad = self.targetPitch_rad - self.pitch_rad
@@ -458,15 +565,15 @@ class Rocket:
 
     def _updateAllSimData(self):
         """
-        Refresh velocity components and air density from `simData` for the
-        current `simTime`.
+        Refresh environment data and translational rails state from
+        `simData` for the current `simTime`.
 
-        Looks up 'zVel_mps', and 'airDensity' at the nearest available row
-        in `simData` via `_getSimData` and assigns them to the corresponding
-        instance attributes. Called once per `sim()` step (and by `reset()`)
-        rather than integrated from first principles, since this data is
-        treated as externally supplied flight/environment input rather 
-        than derived state.
+        Looks up 'airDensity' at the nearest available row in `simData`
+        via `_getSimData` (nearest-neighbor) and assigns it to the
+        corresponding instance attribute. Called once per `sim()` step
+        (and by `reset()`) rather than integrated from first principles,
+        since this data is treated as externally supplied flight/
+        environment input rather than derived state.
 
         Also optionally refreshes `CG_m`/`Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2`/
         `mass_kg` from matching `simData` columns, if present -- letting a
@@ -476,18 +583,82 @@ class Rocket:
         the corresponding heads-up when a constructor argument is about to
         be overridden this way.
 
+        Finally, for each axis ('x', 'y', 'z') that `_resolveTranslationModes`
+        found a `{axis}Pos_m` and/or `{axis}Vel_mps` column for, refreshes
+        that axis's rails state via `_interpTranslationData` (linear
+        interpolation, NOT nearest-neighbor -- see that method's
+        docstring for why rails translation data is treated differently
+        from the nearest-neighbor lookups above):
+            - Both columns present: position AND velocity are each read
+              directly, independently, with no cross-derivation.
+            - Only position present: position is read directly; velocity
+              is derived via a central difference against the position
+              interpolator itself (see `_resolveTranslationModes` for why
+              this avoids a first-step special case).
+            - Only velocity present: velocity is read directly; position
+              is NOT touched here -- it's integrated from this rails
+              velocity later, in `_integrateTranslation`.
+            - Neither present: nothing is touched here at all -- both are
+              left for `_integrateTranslation` to advance from computed
+              acceleration.
+        NOTE: this is a behavior change for `zVel_mps` specifically -- it
+        was previously read via the nearest-neighbor `_getSimData` (like
+        `airDensity` still is above); it's now folded into this same
+        rails-interpolation path for consistency with `xVel_mps`/
+        `yVel_mps`, since it's exactly the same kind of quantity (a
+        rails-supplied translational axis value). If you're comparing
+        against a previous run using a coarsely-sampled `zVel_mps` column,
+        expect smoother (interpolated) values now rather than step-wise
+        nearest-neighbor ones.
+
+        `CG_m` is ALSO now interpolated (see `_hasCGCol`/`_cgInterpData`,
+        cached by `_resolveTranslationModes`) rather than read via
+        nearest-neighbor `_getSimData` -- this was a deliberate fix found
+        during testing: `CG_m` feeds directly into `_torqueFromForce`'s
+        lever arm every step, so a coarsely-sampled `CG_m` column read via
+        nearest-neighbor produces a discontinuous torque jump at every
+        sample boundary, which can drive an already marginally-stable
+        attitude-control loop into a numerical blow-up rather than just
+        perturbing it. `mass_kg`/`Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2` are
+        deliberately NOT changed -- see `_resolveTranslationModes` for why.
+
         Returns:
             None
         """
 
-        if "zVel_mps" in self.simData:   self.zVel_mps   = self._getSimData('zVel_mps', self.simTime)
         if "airDensity" in self.simData: self.airDensity = self._getSimData('airDensity', self.simTime)
 
-        if "CG_m" in self.simData:      self.CG_m     = self._getSimData('CG_m', self.simTime)
+        if self._hasCGCol:              self.CG_m     = self._interpTranslationData(self._cgInterpData, self.simTime)
         if "Ix_kgm2" in self.simData:   self.Ix_kgm2  = self._getSimData('Ix_kgm2', self.simTime)
         if "Iy_kgm2" in self.simData:   self.Iy_kgm2  = self._getSimData('Iy_kgm2', self.simTime)
         if "Iz_kgm2" in self.simData:   self.Iz_kgm2  = self._getSimData('Iz_kgm2', self.simTime)
         if "mass_kg" in self.simData:   self.mass_kg  = self._getSimData('mass_kg', self.simTime)
+
+        for axis, posAttr, velAttr in (
+            ('x', 'xPos_m', 'xVel_mps'),
+            ('y', 'yPos_m', 'yVel_mps'),
+            ('z', 'zPos_m', 'zVel_mps'),
+        ):
+            hasPos = self._hasPosCol[axis]
+            hasVel = self._hasVelCol[axis]
+
+            if hasPos:
+                setattr(self, posAttr, self._interpTranslationData(self._posInterpData[axis], self.simTime))
+
+            if hasVel:
+                setattr(self, velAttr, self._interpTranslationData(self._velInterpData[axis], self.simTime))
+            elif hasPos:
+                # Position-only rails axis: derive velocity via central
+                # difference against the position interpolator itself,
+                # not a backward difference against last step's stored
+                # position -- this needs no special case at simTime=0,
+                # since np.interp already clamps queries outside the
+                # curve's time range to the first/last sample.
+                timeArr, valueArr = self._posInterpData[axis]
+                h = self.simTimeStep / 2.0
+                posPlus_m  = float(np.interp(self.simTime + h, timeArr, valueArr))
+                posMinus_m = float(np.interp(self.simTime - h, timeArr, valueArr))
+                setattr(self, velAttr, (posPlus_m - posMinus_m) / (2 * h))
 
     def _getSimData(self, columnName: str, time: float) -> float:
         """
@@ -499,8 +670,8 @@ class Rocket:
         relative to `simTimeStep`.
 
         Args:
-            columnName (str): Name of the column to read (e.g. 'xVel_mps',
-                'airDensity').
+            columnName (str): Name of the column to read (e.g.
+                'airDensity', 'CG_m').
             time (float): Simulation time in seconds to look up.
 
         Raises:
@@ -526,6 +697,116 @@ class Rocket:
 
         idx = (self.simData['time'] - time).abs().idxmin()
         return self.simData.loc[idx, columnName]
+
+    def _resolveTranslationModes(self) -> None:
+        """
+        Determine, once (called from `__init__`), whether each
+        translational axis ('x', 'y', 'z') is rails-driven or must be
+        integrated from computed acceleration, and presort/cache any
+        interpolation data needed for the rails case -- including `CG_m`,
+        for the reason below.
+
+        For each axis, independently checks whether `simData` has a
+        `{axis}Pos_m` column and/or a `{axis}Vel_mps` column, storing the
+        result in `_hasPosCol[axis]`/`_hasVelCol[axis]`. Both may be
+        present together for the same axis -- deliberately NOT an error:
+        a real flight profile can supply an independently measured
+        position track and velocity track for the same axis, and each is
+        trusted on its own rather than one being derived from the other
+        (derivation would only be *less* accurate than two direct
+        measurements). See `_updateAllSimData`/`_integrateTranslation` for
+        how each of the four (hasPos, hasVel) combinations is actually
+        evaluated every step.
+
+        Whichever columns are present get their (time, value) pairs
+        presorted by time and cached in `_posInterpData[axis]`/
+        `_velInterpData[axis]`, for `_interpTranslationData` to consume
+        via `np.interp` every step -- same "sort once at construction"
+        pattern as `TVC._thrustTime`/`_thrustMagnitude_N`, and for the
+        same reason: `np.interp` requires monotonically increasing
+        x-values, and `simData` isn't guaranteed to already be time-sorted.
+
+        ALSO caches `CG_m`'s (time, value) pair the same way, if present,
+        for `_updateAllSimData` to read via the same
+        `_interpTranslationData` interpolation instead of the
+        nearest-neighbor `_getSimData` used for the other CSV-shadowed
+        constants (`Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2`/`mass_kg`). This was a
+        deliberate fix, not part of the original translation-integration
+        design: `CG_m` feeds directly into `_torqueFromForce`'s lever arm
+        every step, so a coarsely-sampled `CG_m` column read via
+        nearest-neighbor produces a discontinuous torque jump at every
+        sample boundary -- a periodic "kick" that can pump energy into an
+        already marginally-stable/resonant attitude-control loop (see the
+        TVC resonance discussion) rather than just perturbing it,
+        eventually overflowing to a degenerate quaternion. `mass_kg`/
+        `Ix_kgm2`/`Iy_kgm2`/`Iz_kgm2` are NOT changed here -- they weren't
+        implicated in that failure, and changing their lookup behavior
+        without a specific reason risks an unrelated behavior change; flag
+        for discussion if a similar issue shows up with any of them.
+
+        Called only from `__init__` (not `reset()`) since `simData` itself
+        doesn't change between `reset()` calls on the same `Rocket`
+        instance -- the resolved modes and cached arrays stay valid for
+        the instance's lifetime.
+
+        Returns:
+            None
+        """
+        self._hasPosCol = {}
+        self._hasVelCol = {}
+        self._posInterpData = {}
+        self._velInterpData = {}
+
+        _sorted = self.simData.sort_values('time')
+        _sortedTime = _sorted['time'].to_numpy()
+
+        for axis in ('x', 'y', 'z'):
+            posCol = f"{axis}Pos_m"
+            velCol = f"{axis}Vel_mps"
+
+            hasPos = posCol in self.simData
+            hasVel = velCol in self.simData
+
+            self._hasPosCol[axis] = hasPos
+            self._hasVelCol[axis] = hasVel
+
+            if hasPos:
+                self._posInterpData[axis] = (_sortedTime, _sorted[posCol].to_numpy())
+
+            if hasVel:
+                self._velInterpData[axis] = (_sortedTime, _sorted[velCol].to_numpy())
+
+        self._hasCGCol = "CG_m" in self.simData
+        if self._hasCGCol:
+            self._cgInterpData = (_sortedTime, _sorted["CG_m"].to_numpy())
+
+    def _interpTranslationData(self, interpData: tuple, time: float) -> float:
+        """
+        Linearly interpolate a translation rails column (position or
+        velocity) at the given time, against a presorted (time array,
+        value array) pair from `_posInterpData`/`_velInterpData` (see
+        `_resolveTranslationModes`).
+
+        Uses `np.interp` directly, same reasoning as `TVC._getThrustData`:
+        rails position/velocity is treated as a smooth physical quantity
+        (a real trajectory), so interpolating between samples avoids
+        introducing artificial steps a nearest-neighbor lookup would
+        produce on a coarsely-sampled curve -- contrast with `_getSimData`,
+        which stays nearest-neighbor for `airDensity`/`CG_m`/etc.
+
+        Args:
+            interpData (tuple): (time array, value array) pair, presorted
+                by time -- one entry of `_posInterpData`/`_velInterpData`.
+            time (float): Simulation time in seconds to look up.
+
+        Returns:
+            float: The linearly-interpolated value at `time`, clamped to
+                the first/last curve value outside its time range
+                (`np.interp`'s default, no extrapolation -- same behavior
+                as `TVC`).
+        """
+        timeArr, valueArr = interpData
+        return float(np.interp(time, timeArr, valueArr))
 
     def _torqueFromForce(self, force: Force) -> tuple[float, float, float]:
         """
@@ -622,6 +903,109 @@ class Rocket:
         self.zAcc_mps2 = zForce_world_N / self.mass_kg
 
         self.zAcc_mps2 -= self.GRAVITY_MPS2
+
+    def _integrateTranslation(self) -> None:
+        """
+        Advance position (and, for fully-integrated axes, velocity) by
+        one `simTimeStep`, independently per axis, according to whichever
+        of the four rails/integrated combinations that axis resolved to
+        in `_resolveTranslationModes` (`_hasPosCol[axis]`/
+        `_hasVelCol[axis]`):
+
+            hasPos (True or False combined with hasVel) -- position was
+                already set directly this step by `_updateAllSimData`
+                (interpolated from `simData`); nothing to do here.
+            hasVel and not hasPos -- position integrates the rails
+                velocity that `_updateAllSimData` already set this step:
+                `pos += vel * dt`.
+            neither -- full physics integration via semi-implicit
+                (symplectic) Euler: velocity updates from this step's
+                `xAcc_mps2`/`yAcc_mps2`/`zAcc_mps2` (already computed by
+                `_applyForces`, gravity included) FIRST, then position
+                updates using that NEW velocity (not the pre-update
+                velocity) in the same step -- this is what makes it
+                "semi-implicit"/symplectic rather than plain forward
+                Euler, and is what gives it much better long-run energy
+                behavior under a sustained force like gravity.
+
+        Other integration schemes considered, for future reference:
+            - Forward Euler (position uses the OLD, pre-update velocity):
+                simplest, matches the angular-velocity integration already
+                used in `_applyTorques`, but leaks energy over many steps
+                -- drifts worse than semi-implicit Euler at the same
+                timestep under a sustained force.
+            - Velocity Verlet / leapfrog: 2nd-order accurate and still
+                symplectic, but needs acceleration evaluated at BOTH the
+                start and end of the step -- would require a second
+                `_applyForces` call mid-step, which doesn't fit this
+                project's fixed "poll controls once per step" structure.
+            - RK4: highest per-step accuracy, but needs 4 force
+                evaluations per step -- same fit problem as Verlet, and
+                overkill for a controls-testing sim rather than a
+                high-precision trajectory tool.
+            Semi-implicit Euler was chosen since it's the same cost/shape
+            as forward Euler (one extra ordering choice, no extra force
+            evaluations) while being symplectic.
+
+        Also performs a rails-vs-physics conflict check: for any axis
+        that is rails-driven (`hasPos` or `hasVel`) where this step's net
+        decomposed force on that axis (`xForce_N`/`yForce_N`/`zForce_N`,
+        already summed in `sim()` before `_applyForces` runs) is nonzero
+        beyond a small epsilon, emits a `warnings.warn` (run continues --
+        this is intentionally a warning, not an error, since rails data
+        alongside a control that produces real translational force can be
+        a deliberate choice, e.g. rails altitude from a real recorded
+        flight while evaluating TVC's pitch/yaw tracking against it,
+        accepting that the translational consequence of thrust is
+        intentionally not reflected in that axis's rails position). This
+        never fires for `Canards`/`ReactionWheel`, since both are designed
+        to produce zero net translational force (pure couples -- see
+        their class docstrings); it's specifically the TVC-style case
+        (real net thrust, rails altitude) this is meant to catch.
+
+        Returns:
+            None
+        """
+        _FORCE_EPSILON_N = 1e-9
+
+        axisConfig = (
+            ('x', 'xPos_m', 'xVel_mps', 'xAcc_mps2', self.xForce_N),
+            ('y', 'yPos_m', 'yVel_mps', 'yAcc_mps2', self.yForce_N),
+            ('z', 'zPos_m', 'zVel_mps', 'zAcc_mps2', self.zForce_N),
+        )
+
+        for axis, posAttr, velAttr, accAttr, netForce_N in axisConfig:
+            hasPos = self._hasPosCol[axis]
+            hasVel = self._hasVelCol[axis]
+
+            if (hasPos or hasVel) and abs(netForce_N) > _FORCE_EPSILON_N:
+                warnings.warn(
+                    f"Axis '{axis}' is rails-driven (from simData "
+                    f"{self.simDataPath}) but a control generated "
+                    f"{netForce_N:.6g} N of net translational force on "
+                    f"this axis this step (simTime={self.simTime:.4f}s) "
+                    f"-- the rails position/velocity will NOT reflect "
+                    f"this force, so the simulated and rails-driven "
+                    f"trajectories can diverge on this axis.",
+                    stacklevel=2
+                )
+
+            if hasPos:
+                continue  # already set directly by _updateAllSimData
+
+            if hasVel:
+                # Rails velocity, integrated position.
+                vel = getattr(self, velAttr)
+                setattr(self, posAttr, getattr(self, posAttr) + vel * self.simTimeStep)
+                continue
+
+            # Neither rails -- full physics integration, semi-implicit
+            # Euler (see docstring above for why this order, not forward
+            # Euler).
+            acc = getattr(self, accAttr)
+            newVel = getattr(self, velAttr) + acc * self.simTimeStep
+            setattr(self, velAttr, newVel)
+            setattr(self, posAttr, getattr(self, posAttr) + newVel * self.simTimeStep)
 
     def _applyTorques(self, yawTorque_Nm: float, pitchTorque_Nm: float, rollTorque_Nm: float,
         Ix_kgm2: float, Iy_kgm2: float, Iz_kgm2: float
